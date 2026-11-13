@@ -10,8 +10,9 @@ const turns = Number(process.argv[3] ?? 1);
 const provision = process.env.COMPANION_PROVISION_SECRET ?? loadSecrets().COMPANION_PROVISION_SECRET ?? "";
 
 let proc: Bun.Subprocess | undefined;
-let base = process.env.SMOKE_BASE;
-if (!base) {
+const base: string = process.env.SMOKE_BASE ?? (await startLocal());
+
+async function startLocal(): Promise<string> {
   const port = Number(process.env.SMOKE_PORT ?? 18800);
   proc = Bun.spawn(["bun", "run", "src/index.ts"], {
     env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", COMPANION_DATA_DIR: process.env.COMPANION_DATA_DIR ?? "/tmp/companion-smoke" },
@@ -19,7 +20,7 @@ if (!base) {
     stderr: "inherit",
   });
   await Bun.sleep(700);
-  base = `http://127.0.0.1:${port}`;
+  return `http://127.0.0.1:${port}`;
 }
 
 const installId = process.env.SMOKE_INSTALL_ID ?? `smoke-${crypto.randomUUID().slice(0, 12)}`;
