@@ -8,8 +8,9 @@
 
 | 파일 | 내용 |
 |---|---|
-| `src/index.ts` | 서버 진입점: `/healthz`, `/v1/talk` |
-| `src/talk.ts` | `/v1/talk` 웹소켓 핸들러, turn 검증(위치 키 거부), 설정 로드 |
+| `src/index.ts` | 서버 진입점: `/healthz`, 차량 등록·세션 발급, `/v1/talk` |
+| `src/talk.ts` | `/v1/talk` 웹소켓 핸들러(턴 상태·취소·ctx 좌표 제거), 설정 로드 |
+| `src/store.ts` | 차량 등록 sqlite(carToken은 해시만)와 한 번 쓰는 웹소켓 티켓 |
 | `src/llm/` | provider 인터페이스, anthropic·openai·gemini·openai-compatible 어댑터, SSE 파서, 페르소나 초안(임시), 비밀 파일 로더 |
 | `src/observe.ts` | 한 줄 JSON 로그와 오류 코드 집계 |
 | `src/process-guard.ts` | 처리되지 않은 예외·종료 신호 방어, 로그 쓰기 |
@@ -18,16 +19,27 @@
 | `scripts/smoke.ts` | 서버를 띄워 한 턴을 보내고 firstTokenMs·totalMs·모델을 출력 |
 | `scripts/run-relay.sh` | 로그 회전하며 분리 기동 (`HEY_*` 이름은 그대로) |
 
-## /v1/talk
+## 인증과 /v1/talk
 
-텍스트 프레임(JSON)만 받는다. 바이너리(오디오) 프레임은 `1003 TEXT_ONLY`로 닫고, `ctx`에 `lat`·`lng`·`gps`·`location` 같은 위치 키가 있으면 `location_not_accepted`로 거부한다.
+프레임 정의와 검증기는 `shared/packages/protocol`(v0.2.0~)이 정본이다. 고정 공유 토큰은 없다.
+
+1. `POST /v1/cars/register` — 헤더 `X-Provision-Secret`, 본문 `{"installId":"8~64자"}` → `{"carToken"}`. 틀리면 403. 같은 installId로 다시 하면 토큰이 바뀐다(이전 것은 무효).
+2. `POST /v1/sessions` — `Authorization: Bearer <carToken>` → `{"sessionId","wsTicket","expiresInSec":60}`. 없거나 틀리면 401.
+3. `WS /v1/talk?ticket=<wsTicket>` — 티켓은 한 번만, 60초 안에 쓴다. 없거나 틀리거나 이미 쓴 티켓은 업그레이드 전에 401.
+
+텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 `1003`으로 닫는다. 순서: `hello` → `turn.start` → `text`/`ctx` → `turn.end`(또는 `turn.cancel`). `ctx`의 좌표 키(`lat`·`lon`·`gps`·`location` 등)는 조용히 버리고 턴은 계속한다.
 
 ```
-→ {"type":"turn","text":"오늘 비 와서 천천히 갈게","ctx":{"speedKph":0}}
-← {"type":"reply.start","provider":"openai-compatible","model":"chat-fast"}
-← {"type":"reply.delta","text":"..."}            (여러 번)
-← {"type":"reply.end","firstTokenMs":..,"totalMs":..,"chars":..,"resolvedModel":"claude-haiku-5-5"}
+→ {"type":"hello","v":1,"appVersion":"1.0"}
+→ {"type":"turn.start","turnId":"t1","trigger":"ptt"}
+→ {"type":"text","turnId":"t1","text":"오늘 비 와서 천천히 갈게"}
+→ {"type":"turn.end","turnId":"t1"}
+← {"type":"reply.start","turnId":"t1","audio":"none"}
+← {"type":"reply.delta","turnId":"t1","text":"..."}            (여러 번)
+← {"type":"reply.end","turnId":"t1","text":"...","firstTokenMs":..,"totalMs":..}
 ```
+
+`turn.cancel` 뒤에는 그 턴의 프레임을 더 보내지 않는다.
 
 ## 설정
 
@@ -37,8 +49,10 @@
 | `LLM_MODEL` | `chat-fast` | OmniRoute에서는 claude-haiku-5.5 → haiku-4.5 → deepseek 순으로 대체 |
 | `LLM_BASE_URL` | 없음 | openai-compatible 전용, 예: `http://127.0.0.1:20128/v1` |
 | `LLM_API_KEY` | 없음 | 키는 `~/.config/companion/server.env`(600 권한)에서만 읽는다. 예시는 `server.env.example` |
-| `COMPANION_CLIENT_TOKEN` | 없음(필수) | `/v1/talk` 업그레이드에 요구하는 클라이언트 토큰. `Authorization: Bearer <t>` 또는 `Sec-WebSocket-Protocol: companion.<t>`(브라우저용)로 보낸다. 없거나 틀리면 업그레이드 전에 401. 값이 없으면 서버가 시작하지 않는다(fail-closed). 환경변수 또는 600 권한 비밀 파일에서 읽는다 |
-| `COMPANION_ALLOW_NO_AUTH` | 없음 | `1`이면 토큰 없이 시작(로컬 개발·시험 전용) |
+| `COMPANION_PROVISION_SECRET` | 없음(필수) | 차량 등록에 요구하는 비밀(`X-Provision-Secret`). 값이 없으면 서버가 시작하지 않는다(fail-closed). 환경변수 또는 600 권한 비밀 파일에서 읽는다. 앱·웹 소스에 넣지 않는다 |
+| `COMPANION_ALLOW_NO_AUTH` | 없음 | `1`이면 등록 비밀 없이 시작(로컬 개발·시험 전용) |
+| `COMPANION_DATA_DIR` | `./data` | sqlite 파일(`companion.sqlite`) 폴더. 컨테이너에서는 `/data`(이름 있는 볼륨) |
+| `COMPANION_HTTP_PER_MIN` | `30` | IP별 등록·세션 발급 한도(분). 초과 시 429 |
 | `COMPANION_TRUST_PROXY` | 없음 | `1`일 때만 `CF-Connecting-IP`/`X-Forwarded-For`를 클라이언트 IP로 믿는다. Cloudflare 터널 뒤에서는 `1` |
 | `COMPANION_UPGRADES_PER_MIN` | `30` | IP별 업그레이드 시도 한도(분). 초과 시 429 |
 | `COMPANION_TURNS_PER_MIN` | `20` | 연결별 turn 한도(분). 초과 시 `{"type":"error","code":"rate_limited"}`, LLM 호출 없음 |
