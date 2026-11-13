@@ -1,3 +1,5 @@
+import type { GuardConfig } from "./auth";
+import type { RateLimiter } from "./rate-limit";
 import { getProvider, KEY_VAR, streamLlm } from "./llm/providers";
 import { loadSecrets } from "./llm/secrets";
 import { PERSONA_DRAFT } from "./llm/persona";
@@ -55,10 +57,21 @@ export function loadTalkConfig(env: Record<string, string | undefined> = process
   };
 }
 
-type Ws = { send(s: string): unknown; close(code?: number, reason?: string): unknown };
+type Ws = { send(s: string): unknown; close(code?: number, reason?: string): unknown; data?: WsData };
+
+/** 업그레이드 때 붙이는 연결별 데이터. id는 연결 단위 한도의 키다. */
+export interface WsData {
+  id: string;
+}
+
+export interface TalkGuard {
+  guard: Pick<GuardConfig, "turnsPerMin" | "turnsPerDay">;
+  limiter: RateLimiter;
+  fetchImpl?: typeof fetch;
+}
 
 /** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 오디오(바이너리)는 1003으로 닫는다. */
-export function talkHandlers(cfg: TalkConfig, observer: Observability) {
+export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: TalkGuard) {
   const provider = getProvider(cfg.providerName);
   const send = (ws: Ws, o: unknown) => void ws.send(JSON.stringify(o));
   return {
@@ -70,6 +83,15 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability) {
       const t0 = performance.now();
       const v = validateTurn(data);
       if (!v.ok) return send(ws, { type: "error", code: v.code });
+      if (opts) {
+        try {
+          opts.limiter.hit(`turn:${ws.data?.id ?? "anon"}`, opts.guard.turnsPerMin, 60_000);
+          opts.limiter.hit("turn-day", opts.guard.turnsPerDay, 86_400_000);
+        } catch {
+          observer.reject("talk.rate_limited");
+          return send(ws, { type: "error", code: "rate_limited" });
+        }
+      }
       if (!cfg.apiKey) return send(ws, { type: "error", code: "no_key" });
       const meta: { model?: string } = {};
       send(ws, { type: "reply.start", provider: cfg.providerName, model: cfg.model });
@@ -77,7 +99,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability) {
       let chars = 0;
       try {
         const req = { model: cfg.model, system: PERSONA_DRAFT, userText: v.text, maxTokens: cfg.maxTokens, baseUrl: cfg.baseUrl };
-        for await (const d of streamLlm(provider, req, cfg.apiKey, fetch, meta)) {
+        for await (const d of streamLlm(provider, req, cfg.apiKey, opts?.fetchImpl ?? fetch, meta)) {
           first ??= Math.round(performance.now() - t0);
           chars += d.length;
           send(ws, { type: "reply.delta", text: d });
