@@ -39,12 +39,14 @@ export async function* streamLlm(
   apiKey: string,
   fetchImpl: typeof fetch = fetch,
   meta?: { model?: string },
+  signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const spec: HttpRequestSpec = p.buildRequest(req, apiKey);
   const res = await fetchImpl(spec.url, {
     method: "POST",
     headers: spec.headers,
     body: JSON.stringify(spec.body),
+    signal,
   });
   if (!res.ok || !res.body) {
     // 응답 본문만 노출한다. 요청 헤더(키)는 절대 포함하지 않는다.

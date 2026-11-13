@@ -1,7 +1,9 @@
-import { checkToken, clientIp, isLocalRequest, type GuardConfig } from "./auth";
+import type { RegisterResponse, SessionResponse } from "../shared/packages/protocol/src/index";
+import { bearer, clientIp, isLocalRequest, safeEqual, type GuardConfig } from "./auth";
 import { SystemClock, type Clock } from "./clock";
 import type { Observability } from "./observe";
 import { RateLimiter } from "./rate-limit";
+import { CarStore, TicketBook } from "./store";
 import { talkHandlers, type TalkConfig, type WsData } from "./talk";
 
 export type RunningServer = Bun.Server<WsData>;
@@ -12,41 +14,99 @@ export interface ServerOptions {
   talk: TalkConfig;
   guard: GuardConfig;
   observer: Observability;
+  /** 차량 등록 DB 파일 경로(":memory:" 가능). */
+  dbPath: string;
   fetchImpl?: typeof fetch;
   clock?: Clock;
 }
 
-/** /healthz + /v1/talk. 토큰 없는 업그레이드는 401, IP별 시도 한도 초과는 429로 업그레이드 전에 끊는다. */
+const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
+const json = (body: unknown, status = 200) => Response.json(body, { status });
+
+/**
+ * /healthz, POST /v1/cars/register, POST /v1/sessions, WS /v1/talk?ticket=.
+ * 등록은 프로비전 비밀(X-Provision-Secret), 세션은 carToken(Bearer), 웹소켓은 한 번 쓰는 짧은 티켓으로만 연다.
+ */
 export function createServer(o: ServerOptions): RunningServer {
   const clock = o.clock ?? new SystemClock();
   const limiter = new RateLimiter(clock);
-  return Bun.serve<WsData>({
+  const cars = new CarStore(o.dbPath, clock);
+  const tickets = new TicketBook(clock);
+
+  const throttled = (ip: string, bucket: string, max: number) => {
+    try {
+      limiter.hit(`${bucket}:${ip}`, max, 60_000);
+      return false;
+    } catch {
+      o.observer.reject(`${bucket}.rate_limited`);
+      return true;
+    }
+  };
+
+  async function register(req: Request): Promise<Response> {
+    const given = req.headers.get("x-provision-secret") ?? "";
+    if (o.guard.provisionSecret !== undefined && !safeEqual(given, o.guard.provisionSecret)) {
+      o.observer.reject("register.forbidden");
+      return json({ error: "forbidden" }, 403);
+    }
+    const body = (await req.json().catch(() => null)) as { installId?: unknown } | null;
+    const id = body?.installId;
+    if (typeof id !== "string" || !INSTALL_ID.test(id)) return json({ error: "bad_request" }, 400);
+    const res: RegisterResponse = { carToken: cars.register(id) };
+    o.observer.event("car.registered", {});
+    return json(res);
+  }
+
+  function session(req: Request): Response {
+    const token = bearer(req.headers);
+    const installId = token ? cars.lookup(token) : null;
+    if (!installId) {
+      o.observer.reject("session.unauthorized");
+      return json({ error: "unauthorized" }, 401);
+    }
+    const t = tickets.issue(installId);
+    const res: SessionResponse = { sessionId: t.sessionId, wsTicket: t.wsTicket, expiresInSec: t.expiresInSec };
+    return json(res);
+  }
+
+  const server = Bun.serve<WsData>({
     port: o.port,
     hostname: o.hostname,
-    fetch(req, srv) {
+    async fetch(req, srv) {
       const url = new URL(req.url);
       const socketIp = srv.requestIP(req)?.address;
       if (url.pathname === "/healthz") {
-        if (!isLocalRequest(req.headers, socketIp)) return Response.json({ ok: true });
-        return Response.json({ ok: true, provider: o.talk.providerName, model: o.talk.model, errors: o.observer.errors() });
+        if (!isLocalRequest(req.headers, socketIp)) return json({ ok: true });
+        return json({ ok: true, provider: o.talk.providerName, model: o.talk.model, errors: o.observer.errors() });
+      }
+      const ip = clientIp(req.headers, socketIp, o.guard.trustProxy);
+      if (url.pathname === "/v1/cars/register" && req.method === "POST") {
+        if (throttled(ip, "reg", o.guard.httpPerMin)) return json({ error: "rate_limited" }, 429);
+        return register(req);
+      }
+      if (url.pathname === "/v1/sessions" && req.method === "POST") {
+        if (throttled(ip, "ses", o.guard.httpPerMin)) return json({ error: "rate_limited" }, 429);
+        return session(req);
       }
       if (url.pathname !== "/v1/talk") return new Response("not found", { status: 404 });
-      const ip = clientIp(req.headers, socketIp, o.guard.trustProxy);
-      try {
-        limiter.hit(`up:${ip}`, o.guard.upgradesPerMin, 60_000);
-      } catch {
-        o.observer.reject("talk.upgrade_rate_limited");
-        return new Response("rate limited", { status: 429 });
-      }
-      const auth = checkToken(req.headers, o.guard.token);
-      if (!auth.ok) {
+      if (throttled(ip, "up", o.guard.upgradesPerMin)) return new Response("rate limited", { status: 429 });
+      const ticket = url.searchParams.get("ticket");
+      const t = ticket ? tickets.consume(ticket) : null;
+      if (!t) {
         o.observer.reject("talk.unauthorized");
         return new Response("unauthorized", { status: 401 });
       }
-      const headers = auth.protocol ? { "Sec-WebSocket-Protocol": auth.protocol } : undefined;
-      if (srv.upgrade(req, { data: { id: crypto.randomUUID() }, headers })) return;
+      const data: WsData = { id: crypto.randomUUID(), installId: t.installId, sessionId: t.sessionId, hello: false };
+      if (srv.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     },
     websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl }), maxPayloadLength: 4 * 1024 },
   });
+  const stop = server.stop.bind(server);
+  server.stop = (force?: boolean) => {
+    const r = stop(force);
+    cars.close();
+    return r;
+  };
+  return server;
 }

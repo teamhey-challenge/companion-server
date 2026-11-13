@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { getProvider, parseStream } from "../src/llm/providers";
-import { talkHandlers, validateTurn } from "../src/talk";
+import { talkHandlers, type WsData } from "../src/talk";
 import { Observability } from "../src/observe";
 
 const req = { model: "m-1", system: "SYS", userText: "안녕", maxTokens: 123 };
@@ -74,19 +74,6 @@ describe("stream parsing", () => {
   });
 });
 
-describe("turn validation", () => {
-  test("ok", () => expect(validateTurn('{"type":"turn","text":"hi","ctx":{"speedKph":0}}')).toEqual({ ok: true, text: "hi" }));
-  test("rejects location", () => {
-    expect(validateTurn('{"type":"turn","text":"hi","ctx":{"lat":37.5}}')).toEqual({ ok: false, code: "location_not_accepted" });
-    expect(validateTurn('{"type":"turn","text":"hi","ctx":{"GPS":"x"}}')).toEqual({ ok: false, code: "location_not_accepted" });
-  });
-  test("rejects bad input", () => {
-    expect(validateTurn("nope")).toEqual({ ok: false, code: "bad_json" });
-    expect(validateTurn('{"type":"x"}')).toEqual({ ok: false, code: "bad_turn" });
-    expect(validateTurn(JSON.stringify({ type: "turn", text: "a".repeat(501) }))).toEqual({ ok: false, code: "text_too_long" });
-  });
-});
-
 describe("openai-compatible model", () => {
   test("resolved model from stream chunk", async () => {
     const meta: { model?: string } = {};
@@ -105,7 +92,8 @@ describe("talk handler", () => {
   const mk = () => {
     const sent: string[] = [];
     let closed: number | undefined;
-    return { sent, ws: { send: (s: string) => void sent.push(s), close: (c?: number) => void (closed = c) }, closed: () => closed };
+    const data: WsData = { id: "c1", installId: "install-0001", sessionId: "s1", hello: false };
+    return { sent, ws: { data, send: (s: string | Uint8Array) => void sent.push(String(s)), close: (c?: number) => void (closed = c) }, closed: () => closed };
   };
   const h = talkHandlers(cfg, new Observability(() => {}));
   test("binary frame -> close 1003", async () => {
@@ -114,12 +102,20 @@ describe("talk handler", () => {
     expect(c.closed()).toBe(1003);
     expect(c.sent).toEqual([]);
   });
-  test("location key rejected, no key error", async () => {
-    const a = mk();
-    await h.message(a.ws, '{"type":"turn","text":"hi","ctx":{"lat":1}}');
-    expect(JSON.parse(a.sent[0]!).code).toBe("location_not_accepted");
-    const b2 = mk();
-    await h.message(b2.ws, '{"type":"turn","text":"hi"}');
-    expect(JSON.parse(b2.sent[0]!).code).toBe("no_key");
+  test("bad json and bad frames get error codes", async () => {
+    const c = mk();
+    await h.message(c.ws, "nope");
+    await h.message(c.ws, '{"type":"x"}');
+    expect(c.sent.map((s) => JSON.parse(s).code)).toEqual(["bad_json", "bad_frame"]);
+  });
+  test("no LLM key -> no_key error on turn.end", async () => {
+    const c = mk();
+    for (const f of [
+      { type: "hello", v: 1, appVersion: "t" },
+      { type: "turn.start", turnId: "t1", trigger: "ptt" },
+      { type: "text", turnId: "t1", text: "hi" },
+      { type: "turn.end", turnId: "t1" },
+    ]) await h.message(c.ws, JSON.stringify(f));
+    expect(JSON.parse(c.sent[0]!)).toEqual({ type: "error", code: "no_key", turnId: "t1" });
   });
 });

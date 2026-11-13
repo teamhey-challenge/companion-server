@@ -1,3 +1,4 @@
+import { parseClientFrame, MAX_TEXT_CHARS, type Ctx, type ErrorCode, type ServerFrame, type Trigger } from "../shared/packages/protocol/src/index";
 import type { GuardConfig } from "./auth";
 import type { RateLimiter } from "./rate-limit";
 import { getProvider, KEY_VAR, streamLlm } from "./llm/providers";
@@ -11,28 +12,6 @@ const DEFAULT_MODELS: Record<string, string> = {
   gemini: "gemini-2.5-flash",
   "openai-compatible": "chat-fast",
 };
-
-export const MAX_TEXT_CHARS = 500;
-const FORBIDDEN = /^(lat|lng|lon|latitude|longitude|location|gps|position|coords?)$/i;
-
-export type TurnCheck = { ok: true; text: string } | { ok: false; code: string };
-
-/** turn 메시지 검증. ctx에 위치 필드가 있으면 거부. */
-export function validateTurn(raw: unknown): TurnCheck {
-  let m: any;
-  try {
-    m = typeof raw === "string" ? JSON.parse(raw) : raw;
-  } catch {
-    return { ok: false, code: "bad_json" };
-  }
-  if (!m || m.type !== "turn" || typeof m.text !== "string" || !m.text.trim()) return { ok: false, code: "bad_turn" };
-  if (m.text.length > MAX_TEXT_CHARS) return { ok: false, code: "text_too_long" };
-  if (m.ctx !== undefined) {
-    if (typeof m.ctx !== "object" || m.ctx === null || Array.isArray(m.ctx)) return { ok: false, code: "bad_ctx" };
-    if (Object.keys(m.ctx).some((k) => FORBIDDEN.test(k))) return { ok: false, code: "location_not_accepted" };
-  }
-  return { ok: true, text: m.text };
-}
 
 export interface TalkConfig {
   providerName: string;
@@ -57,12 +36,26 @@ export function loadTalkConfig(env: Record<string, string | undefined> = process
   };
 }
 
-type Ws = { send(s: string): unknown; close(code?: number, reason?: string): unknown; data?: WsData };
+interface Turn {
+  id: string;
+  trigger: Trigger;
+  text: string;
+  ctx: Ctx;
+  abort: AbortController;
+  cancelled: boolean;
+  running: boolean;
+}
 
-/** 업그레이드 때 붙이는 연결별 데이터. id는 연결 단위 한도의 키다. */
+/** 업그레이드 때 붙이는 연결별 데이터. 티켓에서 온 installId·sessionId와 현재 턴 상태를 든다. */
 export interface WsData {
   id: string;
+  installId: string;
+  sessionId: string;
+  hello: boolean;
+  turn?: Turn;
 }
+
+type Ws = { send(s: string | Uint8Array): unknown; close(code?: number, reason?: string): unknown; data: WsData };
 
 export interface TalkGuard {
   guard: Pick<GuardConfig, "turnsPerMin" | "turnsPerDay">;
@@ -70,46 +63,112 @@ export interface TalkGuard {
   fetchImpl?: typeof fetch;
 }
 
-/** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 오디오(바이너리)는 1003으로 닫는다. */
+/** 취소된 턴은 아무것도 더 보내지 않는다. */
+function cancel(d: WsData, turnId?: string): void {
+  const t = d.turn;
+  if (!t || (turnId !== undefined && t.id !== turnId)) return;
+  t.cancelled = true;
+  t.abort.abort();
+  d.turn = undefined;
+}
+
+function ctxLine(ctx: Ctx): string {
+  const parts = Object.entries(ctx).map(([k, v]) => `${k}=${v}`);
+  return parts.length ? `\n\n[차량 상태] ${parts.join(", ")}` : "";
+}
+
+/** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 1003으로 닫는다. */
 export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: TalkGuard) {
   const provider = getProvider(cfg.providerName);
-  const send = (ws: Ws, o: unknown) => void ws.send(JSON.stringify(o));
+  const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
+  const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
+
+  async function run(ws: Ws, t: Turn): Promise<void> {
+    const t0 = performance.now();
+    if (opts) {
+      try {
+        opts.limiter.hit(`turn:${ws.data.id}`, opts.guard.turnsPerMin, 60_000);
+        opts.limiter.hit("turn-day", opts.guard.turnsPerDay, 86_400_000);
+      } catch {
+        observer.reject("talk.rate_limited");
+        return fail(ws, "rate_limited", t.id);
+      }
+    }
+    if (!cfg.apiKey) return fail(ws, "no_key", t.id);
+    t.running = true;
+    send(ws, { type: "reply.start", turnId: t.id, audio: "none" });
+    let first: number | null = null;
+    let full = "";
+    const meta: { model?: string } = {};
+    try {
+      const req = { model: cfg.model, system: PERSONA_DRAFT + ctxLine(t.ctx), userText: t.text, maxTokens: cfg.maxTokens, baseUrl: cfg.baseUrl };
+      for await (const d of streamLlm(provider, req, cfg.apiKey, opts?.fetchImpl ?? fetch, meta, t.abort.signal)) {
+        if (t.cancelled) return;
+        first ??= Math.round(performance.now() - t0);
+        full += d;
+        send(ws, { type: "reply.delta", turnId: t.id, text: d });
+      }
+      if (t.cancelled) return;
+      const totalMs = Math.round(performance.now() - t0);
+      send(ws, { type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
+      observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model });
+    } catch (e) {
+      if (t.cancelled) return;
+      observer.error("talk.llm_failed", String((e as Error).message));
+      send(ws, { type: "error", code: "llm_failed", turnId: t.id, message: String((e as Error).message).slice(0, 300) });
+    } finally {
+      if (ws.data.turn === t) ws.data.turn = undefined;
+    }
+  }
+
   return {
+    open(ws: Ws) {
+      observer.event("talk.open", { conn: ws.data.id.slice(0, 8) });
+    },
+    close(ws: Ws) {
+      cancel(ws.data);
+    },
     async message(ws: Ws, data: string | Buffer | ArrayBuffer | Uint8Array) {
       if (typeof data !== "string") {
         observer.reject("talk.binary_rejected");
         return void ws.close(1003, "TEXT_ONLY");
       }
-      const t0 = performance.now();
-      const v = validateTurn(data);
-      if (!v.ok) return send(ws, { type: "error", code: v.code });
-      if (opts) {
-        try {
-          opts.limiter.hit(`turn:${ws.data?.id ?? "anon"}`, opts.guard.turnsPerMin, 60_000);
-          opts.limiter.hit("turn-day", opts.guard.turnsPerDay, 86_400_000);
-        } catch {
-          observer.reject("talk.rate_limited");
-          return send(ws, { type: "error", code: "rate_limited" });
-        }
+      const p = parseClientFrame(data);
+      if (!p.ok) return fail(ws, p.code);
+      const f = p.value;
+      const d = ws.data;
+      if (f.type === "hello") {
+        d.hello = true;
+        return;
       }
-      if (!cfg.apiKey) return send(ws, { type: "error", code: "no_key" });
-      const meta: { model?: string } = {};
-      send(ws, { type: "reply.start", provider: cfg.providerName, model: cfg.model });
-      let first: number | null = null;
-      let chars = 0;
-      try {
-        const req = { model: cfg.model, system: PERSONA_DRAFT, userText: v.text, maxTokens: cfg.maxTokens, baseUrl: cfg.baseUrl };
-        for await (const d of streamLlm(provider, req, cfg.apiKey, opts?.fetchImpl ?? fetch, meta)) {
-          first ??= Math.round(performance.now() - t0);
-          chars += d.length;
-          send(ws, { type: "reply.delta", text: d });
+      if (!d.hello) return fail(ws, "hello_required");
+      switch (f.type) {
+        case "turn.start":
+          cancel(d);
+          d.turn = { id: f.turnId, trigger: f.trigger, text: "", ctx: {}, abort: new AbortController(), cancelled: false, running: false };
+          return;
+        case "ctx": {
+          const t = f.turnId === undefined ? d.turn : d.turn?.id === f.turnId ? d.turn : undefined;
+          if (!t) return fail(ws, "turn_unknown", f.turnId);
+          Object.assign(t.ctx, f.ctx);
+          return;
         }
-        const totalMs = Math.round(performance.now() - t0);
-        send(ws, { type: "reply.end", firstTokenMs: first, totalMs, chars, resolvedModel: meta.model ?? null });
-        observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars, model: meta.model ?? cfg.model });
-      } catch (e) {
-        observer.error("talk.llm_failed", String((e as Error).message));
-        send(ws, { type: "error", code: "llm_failed", message: String((e as Error).message).slice(0, 300) });
+        case "text": {
+          const t = d.turn;
+          if (!t || t.id !== f.turnId || t.running) return fail(ws, "turn_unknown", f.turnId);
+          const next = t.text ? `${t.text} ${f.text}` : f.text;
+          if (next.length > MAX_TEXT_CHARS) return fail(ws, "text_too_long", f.turnId);
+          t.text = next;
+          return;
+        }
+        case "turn.cancel":
+          return cancel(d, f.turnId);
+        case "turn.end": {
+          const t = d.turn;
+          if (!t || t.id !== f.turnId || t.running) return fail(ws, "turn_unknown", f.turnId);
+          if (!t.text.trim()) return fail(ws, "bad_frame", f.turnId);
+          return run(ws, t);
+        }
       }
     },
   };
