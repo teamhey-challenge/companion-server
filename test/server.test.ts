@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { loadGuardConfig } from "../src/auth";
 import { Observability } from "../src/observe";
 import { createServer, type RunningServer, type ServerOptions } from "../src/server";
+import type { TtsProvider } from "../src/tts";
 
 const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 10 };
@@ -20,13 +21,13 @@ interface LlmSeen { calls: number; system: string[] }
 interface Frame { type: string; turnId?: string; text?: string; code?: string; audio?: unknown }
 interface Started { port: number | undefined; base: string; seen: LlmSeen }
 
-function start(guard: Partial<ServerOptions["guard"]> = {}, dbPath = ":memory:", hangLlm = false): Started {
+function start(guard: Partial<ServerOptions["guard"]> = {}, dbPath = ":memory:", hangLlm = false, tts: TtsProvider | null = null, body = sse): Started {
   const seen: LlmSeen = { calls: 0, system: [] };
   const fetchImpl = (async (_u: string, init: RequestInit) => {
     seen.calls++;
     seen.system.push(String(init.body));
     if (hangLlm) await new Promise((_, rej) => init.signal?.addEventListener("abort", () => rej(new Error("aborted"))));
-    return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+    return new Response(body, { headers: { "content-type": "text/event-stream" } });
   }) as unknown as typeof fetch;
   const s = createServer({
     port: 0,
@@ -35,6 +36,7 @@ function start(guard: Partial<ServerOptions["guard"]> = {}, dbPath = ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100, ...guard },
     observer: new Observability(() => {}),
     dbPath,
+    tts,
     fetchImpl,
   });
   servers.push(s);

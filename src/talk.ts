@@ -1,10 +1,11 @@
-import { parseClientFrame, MAX_TEXT_CHARS, type Ctx, type ErrorCode, type ServerFrame, type Trigger } from "../shared/packages/protocol/src/index";
+import { parseClientFrame, MAX_TEXT_CHARS, type AudioSpec, type Ctx, type ErrorCode, type ServerFrame, type Trigger } from "../shared/packages/protocol/src/index";
 import type { GuardConfig } from "./auth";
 import type { RateLimiter } from "./rate-limit";
 import { getProvider, KEY_VAR, streamLlm } from "./llm/providers";
 import { loadSecrets } from "./llm/secrets";
 import { PERSONA_DRAFT } from "./llm/persona";
 import type { Observability } from "./observe";
+import { AudioPipeline, PCM_FORMAT, Semaphore, SentenceSplitter, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-haiku-4-5",
@@ -61,6 +62,8 @@ export interface TalkGuard {
   guard: Pick<GuardConfig, "turnsPerMin" | "turnsPerDay">;
   limiter: RateLimiter;
   fetchImpl?: typeof fetch;
+  /** null/undefined 이면 서버 TTS 없음(reply.start.audio = "none"). */
+  tts?: TtsProvider | null;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -80,6 +83,7 @@ function ctxLine(ctx: Ctx): string {
 /** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 1003으로 닫는다. */
 export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: TalkGuard) {
   const provider = getProvider(cfg.providerName);
+  const sem = new Semaphore();
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
 
@@ -96,7 +100,34 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     }
     if (!cfg.apiKey) return fail(ws, "no_key", t.id);
     t.running = true;
-    send(ws, { type: "reply.start", turnId: t.id, audio: "none" });
+    const tts = opts?.tts ?? null;
+    const emit = (f: ServerFrame) => {
+      if (!t.cancelled) send(ws, f);
+    };
+    // reply.start 는 오디오 형식을 알려야 하므로, TTS 가 켜져 있으면 첫 문장의 첫 오디오(또는 실패)가 정해질 때 보낸다.
+    // 그 전에 온 델타는 모아 두었다가 reply.start 직후에 보낸다.
+    let started = false;
+    let held: string[] = [];
+    const start = (audio: AudioSpec) => {
+      started = true;
+      emit({ type: "reply.start", turnId: t.id, audio });
+      for (const text of held) emit({ type: "reply.delta", turnId: t.id, text });
+      held = [];
+    };
+    const pipeline = tts
+      ? new AudioPipeline(tts, sem, t.abort.signal, {
+          onStart: (ok) => {
+            if (!ok) observer.event("tts.none", {});
+            start(ok ? PCM_FORMAT : "none");
+          },
+          onChunk: (pcm) => {
+            if (!t.cancelled) ws.send(pcm);
+          },
+          onError: (e) => observer.error("tts.failed", e.message),
+        })
+      : null;
+    if (!pipeline) start("none");
+    const splitter = new SentenceSplitter();
     let first: number | null = null;
     let full = "";
     const meta: { model?: string } = {};
@@ -106,14 +137,22 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         if (t.cancelled) return;
         first ??= Math.round(performance.now() - t0);
         full += d;
-        send(ws, { type: "reply.delta", turnId: t.id, text: d });
+        if (started) emit({ type: "reply.delta", turnId: t.id, text: d });
+        else held.push(d);
+        for (const s of splitter.push(d)) pipeline?.add(s);
       }
+      for (const s of splitter.flush()) pipeline?.add(s);
+      pipeline?.finish();
+      await pipeline?.done;
       if (t.cancelled) return;
+      if (!started) start("none");
       const totalMs = Math.round(performance.now() - t0);
-      send(ws, { type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
+      emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
       observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model });
     } catch (e) {
       if (t.cancelled) return;
+      t.abort.abort();
+      pipeline?.finish();
       observer.error("talk.llm_failed", String((e as Error).message));
       send(ws, { type: "error", code: "llm_failed", turnId: t.id, message: String((e as Error).message).slice(0, 300) });
     } finally {

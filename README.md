@@ -34,12 +34,17 @@
 → {"type":"turn.start","turnId":"t1","trigger":"ptt"}
 → {"type":"text","turnId":"t1","text":"오늘 비 와서 천천히 갈게"}
 → {"type":"turn.end","turnId":"t1"}
-← {"type":"reply.start","turnId":"t1","audio":"none"}
+← {"type":"reply.start","turnId":"t1","audio":{"format":"pcm_s16le","sampleRate":24000,"channels":1}}   (TTS 없으면 "audio":"none")
 ← {"type":"reply.delta","turnId":"t1","text":"..."}            (여러 번)
+← (바이너리: PCM s16le 24kHz mono 조각)                         (여러 번)
 ← {"type":"reply.end","turnId":"t1","text":"...","firstTokenMs":..,"totalMs":..}
 ```
 
-`turn.cancel` 뒤에는 그 턴의 프레임을 더 보내지 않는다.
+`turn.cancel` 뒤에는 그 턴의 프레임(텍스트·바이너리)을 더 보내지 않는다.
+
+### 서버 TTS (D-21)
+
+`reply.start.audio`는 `{"format":"pcm_s16le","sampleRate":24000,"channels":1}` 또는 `"none"`. LLM 답이 한 문장 끝날 때마다 BreezeBlue 스트리밍 TTS(`hey_voice.json` 설정, `instructions` 없음)를 시작하고(동시 2개), PCM 조각을 문장 순서대로 **바이너리 프레임**으로 보낸다. `reply.start`는 첫 오디오(또는 실패)가 정해질 때 나가고, 그 전에 온 텍스트 델타는 직후에 쏟아진다. TTS 꺼짐·키 없음·잔액 부족·공급사 오류면 `"none"`이라서 앱이 Pleos TTS로 읽는다. 중간에 실패하면 오디오만 거기서 끊기고 텍스트는 끝까지 간다. 오디오는 디스크에 쓰지 않는다. 목소리가 404면 원본 샘플로 복제를 한 번만 다시 만든다.
 
 ## 설정
 
@@ -50,7 +55,9 @@
 | `LLM_BASE_URL` | 없음 | openai-compatible 전용, 예: `http://127.0.0.1:20128/v1` |
 | `LLM_API_KEY` | 없음 | 키는 `~/.config/companion/server.env`(600 권한)에서만 읽는다. 예시는 `server.env.example` |
 | `COMPANION_PROVISION_SECRET` | 없음(필수) | 차량 등록에 요구하는 비밀(`X-Provision-Secret`). 값이 없으면 서버가 시작하지 않는다(fail-closed). 환경변수 또는 600 권한 비밀 파일에서 읽는다. 앱·웹 소스에 넣지 않는다 |
-| `COMPANION_ALLOW_NO_AUTH` | 없음 | `1`이면 등록 비밀 없이 시작(로컬 개발·시험 전용) |
+| `BREEZE_API_KEY` | 없음 | BreezeBlue 키(600 파일에서만). 없으면 TTS 없이 `audio:"none"` |
+| `COMPANION_TTS_PROVIDER` | `breeze` | `breeze` · `fake`(시험·CI용 가짜 PCM) · `off` |
+| `COMPANION_VOICE_SAMPLE` | 없음 | 목소리를 잃었을 때(404) 복제를 다시 만들 원본 mp3 경로 |
 | `COMPANION_DATA_DIR` | `./data` | sqlite 파일(`companion.sqlite`) 폴더. 컨테이너에서는 `/data`(이름 있는 볼륨) |
 | `COMPANION_HTTP_PER_MIN` | `30` | IP별 등록·세션 발급 한도(분). 초과 시 429 |
 | `COMPANION_TRUST_PROXY` | 없음 | `1`일 때만 `CF-Connecting-IP`/`X-Forwarded-For`를 클라이언트 IP로 믿는다. Cloudflare 터널 뒤에서는 `1` |

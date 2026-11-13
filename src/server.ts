@@ -5,6 +5,7 @@ import type { Observability } from "./observe";
 import { RateLimiter } from "./rate-limit";
 import { CarStore, TicketBook } from "./store";
 import { talkHandlers, type TalkConfig, type WsData } from "./talk";
+import type { TtsProvider } from "./tts";
 
 export type RunningServer = Bun.Server<WsData>;
 
@@ -17,6 +18,8 @@ export interface ServerOptions {
   /** 차량 등록 DB 파일 경로(":memory:" 가능). */
   dbPath: string;
   fetchImpl?: typeof fetch;
+  /** 서버 TTS. 없으면 reply.start.audio = "none". */
+  tts?: TtsProvider | null;
   clock?: Clock;
 }
 
@@ -100,7 +103,7 @@ export function createServer(o: ServerOptions): RunningServer {
       if (srv.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     },
-    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl }), maxPayloadLength: 4 * 1024 },
+    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts }), maxPayloadLength: 4 * 1024 },
   });
   const stop = server.stop.bind(server);
   server.stop = (force?: boolean) => {
