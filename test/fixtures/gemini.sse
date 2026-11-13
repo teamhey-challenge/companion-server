@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"안녕하"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":20}}
+
+data: {"candidates":[{"content":{"parts":[{"text":"세요!"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":6}}
+
