@@ -4,6 +4,7 @@
 // 한 턴마다 turn.end → 첫 reply.delta, 첫 오디오 바이트, reply.end 까지의 ms 와 오디오 바이트 수를 출력한다.
 import { PROVISION_HEADER, type RegisterResponse, type SessionResponse } from "../shared/packages/protocol/src/index";
 import { loadSecrets } from "../src/llm/secrets";
+import { SentenceSplitter } from "../src/tts";
 
 const text = process.argv[2] ?? "오늘 비 와서 천천히 갈게";
 const turns = Number(process.argv[3] ?? 1);
@@ -80,6 +81,12 @@ async function oneTurn(n: number): Promise<Measure | string> {
 
 for (let i = 0; i < turns; i++) {
   const r = await oneTurn(i);
-  console.log(typeof r === "string" ? r : `turn ${i}: audio=${r.audio} firstDeltaMs=${r.firstDeltaMs} firstAudioMs=${r.firstAudioMs} totalMs=${r.totalMs} audioBytes=${r.audioBytes} chars=${r.reply.length}`);
+  if (typeof r === "string") {
+    console.log(r);
+    continue;
+  }
+  const sp = new SentenceSplitter();
+  const calls = sp.push(r.reply).length + sp.flush().length; // 문장 하나 = BreezeBlue 호출 하나
+  console.log(`turn ${i}: audio=${r.audio} firstDeltaMs=${r.firstDeltaMs} firstAudioMs=${r.firstAudioMs} totalMs=${r.totalMs} audioBytes=${r.audioBytes} chars=${r.reply.length} ttsCalls=${calls}`);
 }
 proc?.kill();
