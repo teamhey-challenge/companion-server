@@ -34,6 +34,8 @@ const RECENT_TURNS = 6;
 const PROACTIVE_MAX_TOKENS = 80;
 /** 첫 토큰이 이 시간 안에 안 오면 같은 요청을 한 번 더 보내 먼저 오는 쪽을 쓴다(2026-11-14 측정: 정상 1.4~1.6초, 꼬리 4~9초). */
 const HEDGE_AFTER_MS = 2000;
+/** 일찍 자른 첫 조각을 말하기 전에 뒤로 더 모아 금지 표현 검사에 쓰는 글자 수(가장 긴 금지 표현이 경계에 걸려도 보이게). */
+const EARLY_LOOKAHEAD = 16;
 
 export interface TalkConfig {
   providerName: string;
@@ -365,6 +367,33 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     };
 
     const splitter = new SentenceSplitter(FIRST_PIECE_OPTS);
+    // 첫 조각을 쉼표·띄어쓰기에서 일찍 자르면 금지 표현("속도 / 올려서")이 경계에 걸려 문장 단위 필터를 빠져나간다.
+    // 일찍 자른 조각은 뒤에 EARLY_LOOKAHEAD 글자가 더 모여 "조각 + 뒤"가 필터를 통과하면 그때 말하고, 통과 못 하면 다음 문장과 합쳐 통째로 거른다.
+    let early: string | null = null;
+    let firstSeen = false;
+    const intake = (pieces: string[], final: boolean): boolean => {
+      const out = [...pieces];
+      if (!firstSeen && out.length) {
+        firstSeen = true;
+        if (!final && !/[.!?。！？…]["'”’)\]」』]*$/.test(out[0]!)) early = out.shift()!;
+      }
+      if (early !== null) {
+        if (out.length) {
+          out[0] = `${early} ${out[0]}`;
+          early = null;
+        } else if (final) {
+          out.push(early);
+          early = null;
+        } else {
+          const rest = splitter.pending;
+          if (rest.length >= EARLY_LOOKAHEAD && checkOutput(`${early} ${rest}`, plan.driving, plan.userText) === "ok") {
+            out.push(early);
+            early = null;
+          }
+        }
+      }
+      return feed(out);
+    };
     let first: number | null = null;
     let firstByte: number | null = null;
     const meta: { model?: string } = {};
@@ -401,7 +430,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         check();
         if (t.cancelled) return;
         first ??= Math.round(performance.now() - t0);
-        if (feed(splitter.push(d))) {
+        if (intake(splitter.push(d), false)) {
           unsafe = true;
           llmAbort.abort();
           break;
@@ -413,7 +442,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         }
       }
       check();
-      if (!unsafe) unsafe = feed(splitter.flush());
+      if (!unsafe) unsafe = intake(splitter.flush(), true);
       if (unsafe || spoken.length === 0) {
         observer.event("talk.output_filtered", { unsafe: Number(unsafe), cant: Number(sawCant) });
         say(sawCant && !unsafe ? pick(L.cantDo, plan.speech) : redirectLine(plan.speech));

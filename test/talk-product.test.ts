@@ -166,6 +166,19 @@ describe("sentence cap (PLEOS-125)", () => {
     car.close();
   });
 
+  test("output filter sees banned phrases that straddle an early first-chunk boundary (normal reply: 속도 / 올려서)", async () => {
+    for (const text of ["비 오는 날엔 속도 올려서 달리자!", "오늘은 기분이 좋아서 신호 무시하고 가자!"]) {
+      const llm = newLlm();
+      llm.replies = [text];
+      const car = await readyCar(llm, true);
+      const said = await car.say("안녕", "b1", drive);
+      const deltas = car.frames.filter((f) => f.turnId === "b1" && f.type === "reply.delta").map((f) => f.text).join("");
+      expect(said).not.toMatch(/속도|신호/);
+      expect(deltas).not.toMatch(/속도|신호/);
+      car.close();
+    }
+  });
+
   test("mid-stream: the provider stalls after sentence 2, the server cuts the stream and ends the turn at once", async () => {
     const car = await Car.connect(boot(newLlm(), false, undefined, { stallAfter: "첫 번째 문장이야. 두 번째 문장이야. 세 번째는", llmDeadlineMs: 2500 }));
     await car.grantTalk();
@@ -549,6 +562,18 @@ describe("proactive decision", () => {
       await car.until((f) => f.some((x) => x.type === "reply.end"));
       return car;
     };
+
+    test("proactive arrival: a banned phrase straddling the early first-chunk boundary is not spoken", async () => {
+      const llm = newLlm();
+      llm.proactive = () => "비 오는 날엔 속도 올려서 달리자!";
+      const { b } = await carWithFact(llm);
+      const car = await arrive(b);
+      const end = car.frames.find((f) => f.type === "reply.end")!.text!;
+      const deltas = car.frames.filter((f) => f.type === "reply.delta").map((f) => f.text).join("");
+      expect(end).not.toContain("속도");
+      expect(deltas).not.toContain("속도");
+      car.close();
+    });
 
     test("arrival: a memory said today makes the model's line (with 오늘 말함 in the prompt), spoken once and cap-limited", async () => {
       const llm = newLlm();
