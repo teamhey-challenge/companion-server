@@ -32,6 +32,8 @@ export interface ApiDeps {
   cars: CarStore;
   /** 설정이 바뀌면 그 차의 열린 소켓에 settings 프레임을 보낸다. */
   pushSettings?: (installId: string, settings: Settings) => void;
+  /** 동의가 바뀌면 그 차의 열린 소켓이 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
+  consentChanged?: (installId: string) => void;
   /** 공개 엔드포인트(코드 조회·claim) 열거 방지용 IP별 제한. true면 거절. */
   throttled: (ip: string, bucket: string, max: number) => boolean;
   publicPerMin: number;
@@ -126,6 +128,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     // 채널은 토큰 종류와 일치해야 한다
     if ((b.channel as ConsentChannel) !== who.kind) return bad("channel_mismatch");
     d.api.setConsent(installId, b.type as ConsentType, b.version, b.granted);
+    d.consentChanged?.(installId);
     return json({ consents: d.api.listConsents(installId) });
   }
   const consent = /^\/v1\/consents\/([^/]+)$/.exec(path);

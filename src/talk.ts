@@ -72,6 +72,8 @@ interface Conn {
   ctx: Ctx;
   seen: boolean;
   pro: ProState;
+  /** 동의 전에 첫 정차를 받았을 때 남겨 두는 이어 가기. 동의가 들어오면 TalkHub.consentChanged 가 부른다. */
+  resumeFirstStop?: () => void;
   recent: { u: string; a: string }[];
   arrival?: TimerHandle;
   /** 마지막 답에 끼워 넣은 기억(그거 잊어줘의 "그거") */
@@ -107,6 +109,10 @@ export class TalkHub {
   pushSettings(installId: string, settings: Settings): void {
     const msg = JSON.stringify({ type: "settings", settings } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
+  }
+  /** 동의가 바뀌었다: 동의 때문에 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
+  consentChanged(installId: string): void {
+    for (const ws of this.socks.get(installId) ?? []) ws.data.conn?.resumeFirstStop?.();
   }
 }
 
@@ -530,6 +536,27 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     }
   }
 
+  /** 연결 후 첫 정차(인사·첫 만남). 동의가 있을 때만 부른다. */
+  function firstStop(ws: Ws, s: Settings, cur: Ctx, now: number): void {
+    const d = ws.data;
+    const pro = conn(d).pro;
+    pro.greetChecked = true;
+    if (intervalMs(s.proactive) === null || cur.naviGuiding === true) return;
+    const st = store.getTalkState(d.installId);
+    if (st.meetStage === 0) {
+      if (startProactive(ws, "meet", fixed(meetQuestion(1, s), s.speech, "", false))) {
+        store.patchTalkState(d.installId, { meetStage: 1, lastGreetingDay: kstDay(now) });
+      }
+      return;
+    }
+    // 질문을 받고도 답이 없었던 첫 만남은 기본값으로 끝낸다("무응답이면 기본값").
+    if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
+    const today = kstDay(now);
+    if (st.lastGreetingDay !== today && startProactive(ws, "greeting", greetingPlan(ws, s, cur))) {
+      store.patchTalkState(d.installId, { lastGreetingDay: today });
+    }
+  }
+
   /** 서버가 "지금 말을 걸까"를 정하는 곳. 차 앱이 보낸 ctx 스냅샷이 바뀔 때마다 부른다. */
   function onVehicle(ws: Ws, prev: Ctx, cur: Ctx): void {
     const d = ws.data;
@@ -558,21 +585,16 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     // 기어 P로 바뀜: 첫 정차(인사·첫 만남) 또는 도착(3초 뒤 한마디)
     if (gearP && prev.gear !== "P") {
       if (baseline && !pro.greetChecked) {
-        pro.greetChecked = true;
-        if (gap !== null && !navi) {
-          const st = store.getTalkState(d.installId);
-          if (st.meetStage === 0) {
-            if (startProactive(ws, "meet", fixed(meetQuestion(1, s), s.speech, "", false))) {
-              store.patchTalkState(d.installId, { meetStage: 1, lastGreetingDay: kstDay(now) });
-            }
-            return;
-          }
-          // 질문을 받고도 답이 없었던 첫 만남은 기본값으로 끝낸다("무응답이면 기본값").
-          if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
-          const today = kstDay(now);
-          if (st.lastGreetingDay !== today && startProactive(ws, "greeting", greetingPlan(ws, s, cur))) {
-            store.patchTalkState(d.installId, { lastGreetingDay: today });
-          }
+        if (store.talkAllowed(d.installId)) {
+          firstStop(ws, s, cur, now);
+        } else {
+          // 동의 전에는 말을 걸 수 없다. 확인 완료로 치지 않고 두었다가, 동의가 들어오면(consentChanged) 이어 간다.
+          c.resumeFirstStop = () => {
+            if (pro.greetChecked || c.ctx.gear !== "P") return void (c.resumeFirstStop = undefined);
+            if (!store.talkAllowed(d.installId)) return; // record 와 external_ai 가 따로 들어온다: 둘 다 올 때까지 기다린다
+            c.resumeFirstStop = undefined;
+            firstStop(ws, store.getSettings(d.installId), c.ctx, clock.now());
+          };
         }
         return;
       }
