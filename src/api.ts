@@ -8,6 +8,7 @@ import {
   sanitizeCtx,
   type ConsentChannel,
   type ConsentType,
+  type PairingStatus,
   type Settings,
   type SettingsPatch,
 } from "../shared/packages/protocol/src/index";
@@ -32,6 +33,8 @@ export interface ApiDeps {
   cars: CarStore;
   /** 설정이 바뀌면 그 차의 열린 소켓에 settings 프레임을 보낸다. */
   pushSettings?: (installId: string, settings: Settings) => void;
+  /** 폰·차가 연결을 해제하면 그 차의 열린 소켓에 pairing(none) 프레임을 보낸다. */
+  pushPairing?: (installId: string, status: PairingStatus) => void;
   /** 동의가 바뀌면 그 차의 열린 소켓이 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
   consentChanged?: (installId: string, withdrawn: boolean) => void;
   /** 공개 엔드포인트(코드 조회·claim) 열거 방지용 IP별 제한. true면 거절. */
@@ -145,6 +148,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     if (m === "DELETE") {
       // 차·폰 모두 가능. installId는 토큰에서 나온 값(폰은 phone_hash로 찾은 자기 차)이라 다른 차의 연결은 건드릴 수 없다.
       d.api.unpair(installId);
+      d.pushPairing?.(installId, "none");
       return noContent();
     }
     return null;
