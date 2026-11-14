@@ -16,6 +16,9 @@ import {
 } from "../shared/packages/protocol/src/index";
 import type { Clock } from "./clock";
 
+/** meetStage 0 처음 ~ 4 끝. lastGreetingDay는 차 시계 기준 날짜 문자열. */
+export interface TalkState { meetStage: number; lastGreetingDay: string | null }
+export const DEFAULT_TALK_STATE: TalkState = { meetStage: 0, lastGreetingDay: null };
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 export const CHARACTER_NAME = "헤이파리";
@@ -57,6 +60,7 @@ export class ApiStore {
     db.run(`CREATE TABLE IF NOT EXISTS vehicle_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
     db.run("CREATE INDEX IF NOT EXISTS vehicle_events_car ON vehicle_events (install_id, seq)");
+    db.run("CREATE TABLE IF NOT EXISTS talk_state (install_id TEXT PRIMARY KEY, state TEXT NOT NULL)");
   }
 
   // ---- 동의 ----
@@ -78,6 +82,7 @@ export class ApiStore {
     if (!granted && (type === "record" || type === "memory")) {
       this.deleteAllMemory(installId);
       if (type === "memory") this.patchSettings(installId, { memoryEnabled: false });
+      this.db.query("DELETE FROM talk_state WHERE install_id = ?1").run(installId);
     }
   }
 
@@ -193,6 +198,20 @@ export class ApiStore {
 
   deleteAllMemory(installId: string): void {
     this.db.query("DELETE FROM memory WHERE install_id = ?1").run(installId);
+  }
+
+  // ---- 대화 상태(ServerTalk): 차마다 작은 JSON ----
+  getTalkState(installId: string): TalkState {
+    const r = this.db.query("SELECT state FROM talk_state WHERE install_id = ?1").get(installId) as { state: string } | null;
+    return { ...DEFAULT_TALK_STATE, ...(r ? (JSON.parse(r.state) as Partial<TalkState>) : {}) };
+  }
+
+  patchTalkState(installId: string, patch: Partial<TalkState>): TalkState {
+    const next = { ...this.getTalkState(installId), ...patch };
+    this.db
+      .query("INSERT INTO talk_state (install_id, state) VALUES (?1, ?2) ON CONFLICT(install_id) DO UPDATE SET state = ?2")
+      .run(installId, JSON.stringify(next));
+    return next;
   }
 
   // ---- 설정 ----
