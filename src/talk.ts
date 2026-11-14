@@ -194,7 +194,9 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const timer = setTimeout(() => ctl.abort(), 20_000);
     try {
       let out = "";
-      for await (const d of llmText(system, `운전자가 말한 것:\n${userTexts.map((u) => `- ${u}`).join("\n")}`, 160, ctl.signal)) out += d;
+      const prior = userTexts.slice(0, -1);
+      const user = `${prior.length ? `앞선 말(맥락 참고용, 여기서는 뽑지 않는다):\n${prior.map((u) => `- ${u}`).join("\n")}\n\n` : ""}이번 말(여기서만 뽑는다):\n- ${latest}`;
+      for await (const d of llmText(system, user, 160, ctl.signal)) out += d;
       const items = parseExtraction(out, existing);
       if (!items.length || !store.memoryAllowed(installId)) return;
       for (const it of items) store.addMemory(installId, it.kind, it.text);
