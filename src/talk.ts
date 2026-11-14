@@ -12,7 +12,7 @@ import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
-import { AudioPipeline, PCM_FORMAT, Semaphore, SentenceSplitter, type TtsProvider } from "./tts";
+import { AudioPipeline, PCM_FORMAT, Semaphore, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-haiku-4-5",
@@ -224,17 +224,22 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       for (const text of held) emit({ type: "reply.delta", turnId: t.id, text });
       held = [];
     };
+    let ttsCause = "none";
     const pipeline = tts
       ? new AudioPipeline(tts, sem, t.abort.signal, {
           onStart: (ok) => {
-            if (!ok) observer.event("tts.none", {});
+            if (!ok) observer.event("tts.none", { cause: ttsCause });
             start(ok ? PCM_FORMAT : "none");
           },
           onChunk: (pcm) => {
             firstByte ??= Math.round(performance.now() - t0);
             if (!t.cancelled) ws.send(pcm);
           },
-          onError: (e) => observer.error("tts.failed", e.message),
+          onError: (e) => {
+            // 상태 코드와 종류만 남긴다(본문·키 없음).
+            ttsCause = e instanceof TtsError ? `http_${e.status}` : e.name === "TimeoutError" ? "timeout" : "network";
+            observer.error("tts.failed", ttsCause);
+          },
         })
       : null;
     if (!pipeline) start("none");
