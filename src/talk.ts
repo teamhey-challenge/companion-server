@@ -716,7 +716,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (gearP) tryFirstStop(ws);
 
     // 이벤트 한마디(와이퍼·거리·라이트·도어): 끄기·내비·간격·같은 주행 1회·이유별 쿨다운을 지킨다.
-    if (baseline || gap === null || navi) return;
+    if (baseline || gap === null) return; // 내비 중 차단은 eventAllowed 가 한다(시나리오 2 정차 예외만 통과)
     // 첫 만남 질문이 열려 있는데 이벤트가 먼저 오면 질문은 접고 기본값으로 간다(이벤트가 우선).
     const stage = store.getTalkState(d.installId).meetStage;
     for (const reason of detectEvents(prev, cur, now)) {
