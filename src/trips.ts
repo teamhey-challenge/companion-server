@@ -111,7 +111,7 @@ const RULES: Rule[] = [
     text: { serious: { title: "첫 동행", description: "첫 길을 함께했어요." }, playful: { title: "첫 동행", description: "드디어 같이 타 줬네요, 기다렸어요." } },
     eval: (c) => (c.trips.length ? { earned: true, at: c.trips[0]!.endedAt } : no) },
   { id: "new-region", playful: false,
-    text: { serious: { title: "새 동네", description: "새로운 동네를 열었어요." }, playful: { title: "새 동네", description: "동네 하나 정복! 아무도 안 시켰는데." } },
+    text: { serious: { title: "새 동네", description: "새로운 동네를 열었어요." }, playful: { title: "새 동네", description: "어머, 이 동네는 처음이에요? 어땠는지 나중에 얘기해 줘요." } },
     eval: (c) => {
       const t = c.trips.find((x) => regionKey(x));
       return t ? { earned: true, at: t.endedAt } : no;
@@ -119,7 +119,7 @@ const RULES: Rule[] = [
   { id: "regular", playful: true,
     text: { serious: { title: "단골", description: "자주 가시는 곳이 생겼어요." }, playful: { title: "단골", description: "여기 사장님이랑 친해지셨겠어요." } }, eval: regular },
   { id: "steady-road", playful: true,
-    text: { serious: { title: "한결같은 길", description: "익숙한 길이 생겼어요." }, playful: { title: "한결같은 길", description: "내비 없이도 눈 감고 가는 거 아니죠?" } }, eval: steady },
+    text: { serious: { title: "한결같은 길", description: "익숙한 길이 생겼어요." }, playful: { title: "한결같은 길", description: "이 길은 이제 제가 외웠어요. 내일도 같은 길이죠?" } }, eval: steady },
   { id: "relaxed-day", playful: true,
     text: { serious: { title: "느긋한 하루", description: "주차한 뒤에도 인사를 나눴어요." }, playful: { title: "느긋한 하루", description: "시동 끄고 수다 떨러 오셨군요." } },
     eval: (c) => {
