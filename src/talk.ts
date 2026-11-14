@@ -322,7 +322,13 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const llmAbort = new AbortController();
     t.abort.signal.addEventListener("abort", () => llmAbort.abort(), { once: true });
     const spoken: string[] = [];
+    let firstPieceMs: number | null = null;
+    let firstPieceChars: number | null = null;
     const say = (piece: string) => {
+      if (firstPieceMs === null) {
+        firstPieceMs = Math.round(performance.now() - t0);
+        firstPieceChars = piece.length;
+      }
       const text = spoken.length ? ` ${piece}` : piece;
       spoken.push(piece);
       if (started) emit({ type: "reply.delta", turnId: t.id, text });
@@ -420,7 +426,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const full = spoken.join(" ");
       emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
       observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model, proactive: Number(t.proactive === true) });
-      observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, firstAudioMs: firstAudio, fillerMs, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
+      observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, firstAudioMs: firstAudio, fillerMs, firstPieceMs, firstPieceChars, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
       c.recent.push({ u: plan.userText, a: full });
       if (c.recent.length > RECENT_TURNS) c.recent.shift();
       c.quietUntil = clock.now() + QUIET_AFTER_REPLY_MS;

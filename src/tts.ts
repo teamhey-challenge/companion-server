@@ -106,13 +106,18 @@ export class BreezeTts implements TtsProvider {
     });
   }
 
+  /**
+   * 턴이 시작될 때(LLM 첫 토큰을 기다리는 1.5초 동안) 공급사 연결을 데워 둔다. 크레딧을 쓰지 않는 GET 이다.
+   * fetch.preconnect 는 이 Bun(1.4.x)에서 "Invalid port" 로 던져 한 번도 동작하지 않았다(예외를 삼켜서 몰랐다).
+   * 데운 연결은 첫 합성 요청이 그대로 쓴다(2026-11-14 측정: 첫 TTS 요청 1.0~1.6초 → 연결 재사용 0.55~0.7초).
+   */
   warm(): void {
-    // Bun 이 같은 호스트의 연결 풀을 재사용하므로, 첫 요청의 TLS 핸드셰이크(약 0.4초)를 LLM 을 기다리는 동안 끝내 둔다.
-    try {
-      fetch.preconnect(BREEZE_BASE);
-    } catch {
-      /* 미리 연결은 최적화일 뿐 */
-    }
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5000);
+    this.fetchImpl(`${BREEZE_BASE}/v1/models`, { headers: { "xi-api-key": this.cfg.apiKey ?? "" }, signal: ctl.signal })
+      .then((r) => r.arrayBuffer())
+      .catch(() => undefined)
+      .finally(() => clearTimeout(timer));
   }
 
   async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
