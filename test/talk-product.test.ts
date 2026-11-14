@@ -175,6 +175,47 @@ describe("sentence cap (PLEOS-125)", () => {
   });
 });
 
+describe("output filter: lectures and things the app cannot do (PLEOS-125)", () => {
+  test("checkOutput classifies lecture / cant-do / ok", () => {
+    expect(checkOutput("비 오니까 천천히 가자.", true)).toBe("drop");
+    expect(checkOutput("안전운전 해!", true)).toBe("drop");
+    expect(checkOutput("조심해서 운전해.", true)).toBe("drop");
+    expect(checkOutput("가까운 주유소 찾아볼까?", true)).toBe("cant");
+    expect(checkOutput("맛집 검색해 줄게!", false)).toBe("cant");
+    expect(checkOutput("근처 주유소를 찾아 들러 보는 게 좋겠어.", true)).toBe("cant");
+    expect(checkOutput("길 안내해 줄까?", true)).toBe("cant");
+    expect(checkOutput("비 오는 날엔 잔잔한 노래가 좋아.", true)).toBe("ok");
+    expect(checkOutput("천천히 가자", true, "천천히 가는 게 좋을까?")).toBe("ok"); // 운전자가 물었으면 허용
+    expect(checkOutput("나는 찾아보기 어려운 노래를 알아.", true)).toBe("ok");
+  });
+
+  test("a lecture sentence is removed before counting: the 2 sentences left are the useful ones", async () => {
+    const llm = newLlm();
+    llm.replies = ["비 오네. 천천히 가자. 와이퍼가 돌고 있어. 노래 틀까?"];
+    const car = await readyCar(llm);
+    const text = await car.say("비 와", "f1", drive);
+    expect(text).toBe("비 오네. 와이퍼가 돌고 있어.");
+    car.close();
+  });
+
+  test("a cant-do offer is dropped; when nothing else is left the honest line is said", async () => {
+    const llm = newLlm();
+    llm.replies = ["가까운 주유소 찾아볼까?", "국밥 어때? 근처 식당 검색해 줄게."];
+    const car = await readyCar(llm);
+    expect(await car.say("기름 없어", "k1", drive)).toBe("나는 검색이나 길 안내는 못 해, 그래도 얘기는 같이 할 수 있어!");
+    expect(await car.say("점심 뭐 먹지", "k2", drive)).toBe("국밥 어때?");
+    car.close();
+  });
+
+  test("the user asked about driving slowly -> the answer may say it", async () => {
+    const llm = newLlm();
+    llm.replies = ["비 오면 천천히 가는 게 좋지."];
+    const car = await readyCar(llm);
+    expect(await car.say("비 올 때 천천히 가야 해?", "a1", drive)).toBe("비 오면 천천히 가는 게 좋지.");
+    car.close();
+  });
+});
+
 describe("SentenceCap unit", () => {
   test("counts ? ! … and newline ends, ignores dots inside a sentence", () => {
     const cap = new SentenceCap(2);

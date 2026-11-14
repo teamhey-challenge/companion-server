@@ -5,6 +5,21 @@ const SENTENCE_END = /[.!?。！？…]+["'”’)\]」』]*(?=\s|$)|\n+/g;
 export const DRIVING_MAX_SENTENCES = 2;
 export const PARKED_MAX_SENTENCES = 4;
 
+/** 조각을 문장 단위로 나눈다(끝 부호 포함, 끝 부호 없는 꼬리는 마지막 문장). 출력 필터가 문장마다 판정할 때 쓴다. */
+export function splitSentences(piece: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (const m of piece.matchAll(SENTENCE_END)) {
+    const end = m.index + m[0].length;
+    const s = piece.slice(start, end).trim();
+    if (s) out.push(s);
+    start = end;
+  }
+  const rest = piece.slice(start).trim();
+  if (rest) out.push(rest);
+  return out;
+}
+
 /**
  * 말할 조각을 순서대로 받아 문장 수 상한을 넘는 부분을 잘라 낸다.
  * 조각은 한 문장보다 짧을 수 있고(첫 조각 쉼표 자르기) 여러 문장일 수도 있다.
