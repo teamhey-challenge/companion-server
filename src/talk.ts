@@ -5,9 +5,9 @@ import { answerChat, answerNickname, answerSpeech, bestMatch, parseExtraction, p
 import { getProvider, KEY_VAR, streamLlm } from "./llm/providers";
 import { buildSystem, MEMORY_EXTRACT_SYSTEM } from "./llm/persona";
 import { loadSecrets } from "./llm/secrets";
-import { L, forgetDone, nicknameSet, pick, withName } from "./lines";
+import { L, forgetDone, nicknameSet, pick, rangeDestLine, withName } from "./lines";
 import type { Observability } from "./observe";
-import { ARRIVAL_DELAY_MS, MAX_MEMORY_RECALLS, detectEvents, eventAllowed, fuelKind, intervalMs, isNight, kstDay, newProState, wiperOn, type EventReason, type ProState, type Reason } from "./proactive";
+import { ARRIVAL_DELAY_MS, MAX_MEMORY_RECALLS, RANGE_REFILLED_KM, detectEvents, eventAllowed, fuelKind, intervalMs, isNight, isPostpone, kstDay, newProState, wiperOn, type EventReason, type ProState, type Reason } from "./proactive";
 import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
@@ -460,10 +460,18 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const c = conn(d);
     const s = store.getSettings(d.installId);
     const ctx = { ...c.ctx, ...t.ctx };
+    // 시나리오 2: 방금 "들를래?"를 물었고 이 답이 "이따가 할래"면 미뤄 둔다. 어느 쪽이든 질문은 이 답 한 번으로 끝난다.
+    const asked = c.pro.rangeAsk;
+    c.pro.rangeAsk = null;
     const parked = isParked(ctx);
     const driving = !parked;
     const text = t.text.trim();
 
+    if (asked && isPostpone(text) && !checkInput(text, s.speech)) {
+      store.patchTalkState(d.installId, { pendingStop: asked });
+      observer.event("talk.stop_postponed", { kind: asked });
+      return fixed(pick(L.postponeAck, s.speech), s.speech, text, driving);
+    }
     const refusal = checkInput(text, s.speech);
     if (refusal) {
       observer.event("talk.safety_refused", { kind: refusal.kind });
@@ -618,9 +626,28 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       case "door": return pick(L.door, s.speech);
       case "range": {
         const k = fuelKind(ctx.fuelType);
+        if (typeof ctx.destKm === "number" && ctx.destKm > 0 && typeof ctx.rangeKm === "number") return rangeDestLine(k, Math.round(ctx.destKm), Math.round(ctx.rangeKm), s.speech);
         return pick(k === "ev" ? L.rangeEv : k === "lpg" ? L.rangeLpg : L.rangeIce, s.speech);
       }
     }
+  }
+
+  /**
+   * 미뤄 둔 들르기(시나리오 2)를 다음 정차에 한 번 챙긴다. 내비 안내 중이면(D-14) 건드리지 않고 남겨 둔다.
+   * 그사이 주행가능거리가 넉넉해졌으면(충전·주유 했다) 말없이 지운다. 말하면 true.
+   */
+  function remindStop(ws: Ws, s: Settings, cur: Ctx): boolean {
+    const id = ws.data.installId;
+    const kind = store.getTalkState(id).pendingStop;
+    if (!kind || cur.naviGuiding === true || intervalMs(s.proactive) === null) return false;
+    if (typeof cur.rangeKm === "number" && cur.rangeKm >= RANGE_REFILLED_KM) {
+      store.patchTalkState(id, { pendingStop: null });
+      return false;
+    }
+    if (!startProactive(ws, "reminder", fixed(pick(kind === "ev" ? L.remindEv : kind === "lpg" ? L.remindLpg : L.remindIce, s.speech), s.speech, "", false))) return false;
+    store.patchTalkState(id, { pendingStop: null });
+    observer.event("talk.stop_reminded", { kind });
+    return true;
   }
 
   /** 연결 후 첫 정차(인사·첫 만남). 끝났으면(말을 걸었거나 걸 일이 없으면) true, 이미 말하는 중이라 거절됐으면 false 라 다시 시도한다. */
@@ -635,7 +662,10 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     // 질문을 받고도 답이 없었던 첫 만남은 기본값으로 끝낸다("무응답이면 기본값").
     if (st.meetStage < 4) store.patchTalkState(ws.data.installId, { meetStage: 4 });
     const today = kstDay(now);
-    if (st.lastGreetingDay === today) return true;
+    if (st.lastGreetingDay === today) {
+      remindStop(ws, s, cur);
+      return true;
+    }
     if (!startProactive(ws, "greeting", greetingPlan(ws, s, cur))) return false;
     store.patchTalkState(ws.data.installId, { lastGreetingDay: today });
     return true;
@@ -701,7 +731,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
           const cur2 = c.ctx;
           if (cur2.gear !== "P" || cur2.naviGuiding === true || !pro.drove) return;
           const s2 = store.getSettings(d.installId);
-          if (intervalMs(s2.proactive) !== null) startProactive(ws, "arrival", arrivalPlan(ws, s2, cur2));
+          if (intervalMs(s2.proactive) !== null && !remindStop(ws, s2, cur2)) startProactive(ws, "arrival", arrivalPlan(ws, s2, cur2));
           // 새 주행을 위해 한 주행 단위 상태를 비운다. 말을 못 걸었더라도(내비·재생 중) 낡은 도착을 다음에 말하지 않는다.
           pro.drove = false;
           pro.fired.clear();
@@ -716,12 +746,13 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (gearP) tryFirstStop(ws);
 
     // 이벤트 한마디(와이퍼·거리·라이트·도어): 끄기·내비·간격·같은 주행 1회·이유별 쿨다운을 지킨다.
-    if (baseline || gap === null || navi) return;
+    if (baseline || gap === null) return; // 내비 중 차단은 eventAllowed 가 한다(시나리오 2 정차 예외만 통과)
     // 첫 만남 질문이 열려 있는데 이벤트가 먼저 오면 질문은 접고 기본값으로 간다(이벤트가 우선).
     const stage = store.getTalkState(d.installId).meetStage;
     for (const reason of detectEvents(prev, cur, now)) {
       if (!eventAllowed(reason, s.proactive, cur, pro, now)) continue;
       if (startProactive(ws, reason, fixed(eventLine(reason, s, cur), s.speech, "", !isParked(cur)))) {
+        if (reason === "range") pro.rangeAsk = fuelKind(cur.fuelType);
         pro.fired.add(reason);
         pro.reasonAt[reason] = now;
         pro.lastEventAt = now;

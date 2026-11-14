@@ -67,6 +67,7 @@ export function describeCtx(ctx: Ctx): string {
       case "naviGuiding": parts.push(v ? "내비 안내 중" : "내비 안내 없음"); break;
       case "wiper": parts.push(/^(off|0|false|none)$/i.test(String(v)) || v === false || v === 0 ? "와이퍼 꺼짐" : "와이퍼 작동 중(실제 강수량은 모름)"); break;
       case "rangeKm": parts.push(`주행가능거리 ${v}km(연료·배터리 퍼센트는 모름)`); break;
+      case "destKm": parts.push(`내비 목적지까지 ${v}km(목적지 이름·위치는 모름)`); break;
       case "fuelType": parts.push(`차 종류 ${FUEL_LABEL[String(v)] ?? "내연기관차"}(숫자 코드이며 퍼센트가 아님)`); break;
       case "headlight": parts.push(v ? "헤드라이트 켜짐" : "헤드라이트 꺼짐"); break;
       case "doorOpen": parts.push(v ? "문 열림" : "문 닫힘"); break;
