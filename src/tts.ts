@@ -28,9 +28,13 @@ export class TtsError extends Error {
   }
 }
 
+/** synth 의 보조 옵션. background 는 미리 만들어 두기 같은 배경 작업: 실제 턴이 쓸 자리를 남겨 둔다. */
+export interface SynthOpts {
+  background?: boolean;
+}
 /** 한 문장의 PCM 청크 스트림. 취소하면 signal 로 끊는다. */
 export interface TtsProvider {
-  synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>>;
+  synth(text: string, signal: AbortSignal, opts?: SynthOpts): Promise<AsyncIterable<Uint8Array>>;
   /** 곧 synth 가 불릴 것을 알리는 신호. 연결(TCP+TLS)을 미리 열어 둔다. 실패해도 조용히 넘어간다. */
   warm?(): void;
   /** 이 문장의 오디오가 메모리에 있어 공급사를 거치지 않고 바로 나가는가. */
@@ -160,9 +164,12 @@ export function makeTts(cfg: TtsConfig, observer: Observability, fetchImpl?: typ
 /** 공급사 전체 동시 생성 수를 제한한다(Starter: 최대 2). */
 export class Semaphore {
   private free: number;
+  private readonly capacity: number;
   private readonly queue: (() => void)[] = [];
+  private readonly idle: (() => void)[] = [];
   constructor(n = MAX_CONCURRENT) {
     this.free = n;
+    this.capacity = n;
   }
   async acquire(signal: AbortSignal): Promise<void> {
     if (this.free > 0) {
@@ -187,6 +194,26 @@ export class Semaphore {
     const next = this.queue.shift();
     if (next) next();
     else this.free++;
+    const waiting = this.idle.splice(0);
+    for (const wake of waiting) wake();
+  }
+
+  /**
+   * 배경 작업용: 줄 서 있는 실제 요청이 없고, 잡은 뒤에도 자리가 reserve 개 남을 때만 잡는다(실제 턴이 항상 자리를 얻도록).
+   * 한도가 reserve 이하이면(자리가 하나뿐) 아무도 안 쓰고 있을 때만 잡는다.
+   */
+  async acquireIdle(signal: AbortSignal, reserve = 1): Promise<void> {
+    const need = Math.min(reserve + 1, this.capacity);
+    while (this.free < need || this.queue.length > 0) {
+      if (signal.aborted) throw new Error("aborted");
+      const { promise, resolve } = Promise.withResolvers<void>();
+      this.idle.push(resolve);
+      const wake = () => resolve();
+      signal.addEventListener("abort", wake, { once: true });
+      await promise;
+      signal.removeEventListener("abort", wake);
+    }
+    this.free--;
   }
 }
 
@@ -209,11 +236,12 @@ export class GatedTts implements TtsProvider {
     this.inner.warm?.();
   }
 
-  async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
+  async synth(text: string, signal: AbortSignal, opts?: SynthOpts): Promise<AsyncIterable<Uint8Array>> {
     const t0 = performance.now();
-    await this.sem.acquire(signal);
+    if (opts?.background) await this.sem.acquireIdle(signal);
+    else await this.sem.acquire(signal);
     const waited = Math.round(performance.now() - t0);
-    if (waited >= 1) this.observer.event("tts.queue_wait", { ms: waited });
+    if (waited >= 1 && !opts?.background) this.observer.event("tts.queue_wait", { ms: waited });
     let body: AsyncIterable<Uint8Array>;
     try {
       body = await this.inner.synth(text, signal);
@@ -268,7 +296,7 @@ export class PhraseCache implements TtsProvider {
     this.inner.warm?.();
   }
 
-  async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
+  async synth(text: string, signal: AbortSignal, opts?: SynthOpts): Promise<AsyncIterable<Uint8Array>> {
     const k = this.key(text);
     const hit = this.map.get(k);
     if (hit) {
@@ -281,7 +309,7 @@ export class PhraseCache implements TtsProvider {
         }
       })();
     }
-    const body = await this.inner.synth(text, signal);
+    const body = await this.inner.synth(text, signal, opts);
     if (!this.keep.has(text)) return body;
     const got: Uint8Array[] = [];
     const store = (chunks: Uint8Array[]) => this.store(k, chunks);
@@ -309,17 +337,21 @@ export class PhraseCache implements TtsProvider {
     }
   }
 
-  /** 문장을 하나씩 합성해 담는다(한 번에 자리 하나만 쓴다). 연속 2번 실패하면 멈춘다(키·크레딧 문제일 수 있다). */
-  async prime(texts: string[], signal: AbortSignal = new AbortController().signal): Promise<{ done: number; failed: number; entries: number; bytes: number }> {
-    for (const t of texts) this.keep.add(t);
+  /**
+   * 문장을 하나씩 합성해 담는다. 배경 작업이라 실제 턴이 쓸 자리를 남기고(자리가 둘 다 비었을 때만 하나 쓴다), 연속 2번 실패하면 멈춘다(키·크레딧 문제일 수 있다).
+   * first 에 든 문장을 먼저 만든다(채움말처럼 서버가 뜨자마자 필요한 것).
+   */
+  async prime(texts: string[], signal: AbortSignal = new AbortController().signal, first: string[] = []): Promise<{ done: number; failed: number; entries: number; bytes: number }> {
+    const order = [...new Set([...first, ...texts])];
+    for (const t of order) this.keep.add(t);
     let done = 0;
     let failed = 0;
     let streak = 0;
-    for (const text of texts) {
+    for (const text of order) {
       if (signal.aborted || streak >= 2) break;
       if (this.cached(text)) continue;
       try {
-        for await (const _ of await this.synth(text, signal)) void _;
+        for await (const _ of await this.synth(text, signal, { background: true })) void _;
         done++;
         streak = 0;
       } catch {
