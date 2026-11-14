@@ -386,6 +386,11 @@ export class SentenceSplitter {
 
   constructor(private readonly opts: { firstClauseMin?: number; firstWordsMin?: number } = {}) {}
 
+  /** 아직 내보내지 않은 글자(경계 검사용). */
+  get pending(): string {
+    return this.buf;
+  }
+
   push(delta: string): string[] {
     this.buf += delta;
     const out: string[] = [];
