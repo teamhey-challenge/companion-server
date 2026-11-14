@@ -475,6 +475,27 @@ describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
     car.close();
   });
 
+  test("consent first, then the baseline ctx: the first-meeting question still comes (order-independent)", async () => {
+    const car = await Car.connect(boot(newLlm()));
+    await car.grantTalk();
+    car.ctx({ gear: "P", speedKmh: 0 });
+    await car.until((f) => f.some((x) => x.type === "reply.end"));
+    expect(proactives(car).map((p) => p.reason)).toEqual(["meet"]);
+    car.close();
+  });
+
+  test("a refused first stop (turn busy) is retried and the question still comes", async () => {
+    const car = await Car.connect(boot(newLlm()));
+    car.send({ type: "turn.start", turnId: "b1", trigger: "ptt" }); // an open turn makes startProactive refuse
+    car.ctx({ gear: "P", speedKmh: 0 });
+    await car.grantTalk();
+    await Bun.sleep(100); // negative check: refused while the turn is open
+    expect(proactives(car)).toEqual([]);
+    car.send({ type: "turn.cancel", turnId: "b1" });
+    await car.until((f) => f.some((x) => x.type === "proactive" && x.reason === "meet"), 4000);
+    car.close();
+  });
+
   test("baseline P before C1: the first-meeting question comes once both consents arrive on the live socket", async () => {
     const car = await Car.connect(boot(newLlm()));
     car.ctx({ gear: "P", speedKmh: 0 });
