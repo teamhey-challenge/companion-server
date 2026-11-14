@@ -356,6 +356,19 @@ describe("memory", () => {
 });
 
 describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
+  test("baseline P before C1: the first-meeting question comes once both consents arrive on the live socket", async () => {
+    const car = await Car.connect(boot(newLlm()));
+    car.ctx({ gear: "P", speedKmh: 0 });
+    await Bun.sleep(100); // negative check: nothing may arrive before consent
+    expect(proactives(car)).toEqual([]);
+    await car.consent("record");
+    expect(proactives(car)).toEqual([]);
+    await car.consent("external_ai");
+    await car.until((f) => f.some((x) => x.type === "reply.end"));
+    expect(proactives(car).map((p) => p.reason)).toEqual(["meet"]);
+    car.close();
+  });
+
   test("a car with no consent: turn -> consent_required, no LLM call, no proactive", async () => {
     const llm = newLlm();
     const car = await Car.connect(boot(llm, true));
