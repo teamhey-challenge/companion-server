@@ -373,4 +373,10 @@ describe("intents and latency helpers", () => {
     const t = new SentenceSplitter({ firstClauseMin: 8 });
     expect(t.push("응, 맞아. 그래")).toEqual(["응, 맞아."]);
   });
+
+  test("first piece is cut at the last space once it has >= firstWordsMin chars even without comma or sentence end", () => {
+    const s = new SentenceSplitter({ firstClauseMin: 8, firstWordsMin: 12 });
+    expect(s.push("오늘 하루 어땠는지 정말 궁금")).toEqual(["오늘 하루 어땠는지 정말"]);
+    expect(s.push("해서 물어봤어. 너는")).toEqual(["궁금해서 물어봤어."]);
+  });
 });

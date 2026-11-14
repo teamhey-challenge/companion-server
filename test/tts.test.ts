@@ -54,7 +54,7 @@ describe("AudioPipeline", () => {
         throw new TtsError(402, "no credits");
       },
     };
-    expect(await run(bad, ["첫 문장입니다."])).toEqual(["none"]);
+    expect(await run(bad, ["첫 문장입니다."])).toEqual(["error", "none"]);
   });
   test("no sentences -> none", async () => {
     expect(await run(new FakeTts(), [])).toEqual(["none"]);

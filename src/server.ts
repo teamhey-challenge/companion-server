@@ -90,7 +90,7 @@ export function createServer(o: ServerOptions): RunningServer {
       const socketIp = srv.requestIP(req)?.address;
       if (url.pathname === "/healthz") {
         if (!isLocalRequest(req.headers, socketIp)) return json({ ok: true });
-        return json({ ok: true, provider: o.talk.providerName, model: o.talk.model, errors: o.observer.errors() });
+        return json({ ok: true, provider: o.talk.providerName, model: o.talk.model, errors: o.observer.errors(), latency: o.observer.latency() });
       }
       const ip = clientIp(req.headers, socketIp, o.guard.trustProxy);
       if (url.pathname === "/v1/cars/register" && req.method === "POST") {
