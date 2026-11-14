@@ -3,7 +3,7 @@ import type { GuardConfig } from "./auth";
 import { SystemClock, type Clock, type TimerHandle } from "./clock";
 import { answerChat, answerNickname, answerSpeech, bestMatch, parseExtraction, parseForget, parseNicknameRequest, parseSpeechChange, recall, snippet } from "./intents";
 import { getProvider, KEY_VAR, streamLlm } from "./llm/providers";
-import { buildSystem, MEMORY_EXTRACT_SYSTEM } from "./llm/persona";
+import { buildExtractRequest, buildSystem } from "./llm/persona";
 import { loadSecrets } from "./llm/secrets";
 import { L, forgetDone, nicknameSet, pick, rangeDestLine, withName } from "./lines";
 import type { Observability } from "./observe";
@@ -259,14 +259,12 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const latest = userTexts.at(-1) ?? "";
     if (!cfg.apiKey || latest.trim().length < 6 || !store.memoryAllowed(installId)) return;
     const existing = store.listMemory(installId, 30).map((m) => m.text);
-    const system = `${MEMORY_EXTRACT_SYSTEM}\n\n이미 기억함:\n${existing.length ? existing.map((e) => `- ${e}`).join("\n") : "(없음)"}`;
+    const req = buildExtractRequest(existing, userTexts);
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 20_000);
     try {
       let out = "";
-      const prior = userTexts.slice(0, -1);
-      const user = `${prior.length ? `앞선 말(맥락 참고용, 여기서는 뽑지 않는다):\n${prior.map((u) => `- ${u}`).join("\n")}\n\n` : ""}이번 말(여기서만 뽑는다):\n- ${latest}`;
-      for await (const d of llmText(system, user, 160, ctl.signal)) out += d;
+      for await (const d of llmText(req.system, req.user, 160, ctl.signal)) out += d;
       const items = parseExtraction(out, existing);
       if (!items.length || !store.memoryAllowed(installId)) return;
       for (const it of items) store.addMemory(installId, it.kind, it.text);
