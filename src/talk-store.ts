@@ -1,4 +1,5 @@
 import type { Ctx, MemoryItem, MemoryKind, Settings } from "../shared/packages/protocol/src/index";
+import type { TripRow } from "./trips";
 import { DEFAULT_SETTINGS, DEFAULT_TALK_STATE, normalizeMemoryText, type TalkState } from "./api-store";
 
 
@@ -21,6 +22,10 @@ export interface TalkStore {
   patchTalkState(installId: string, patch: Partial<TalkState>): TalkState;
   /** 선택: 차량 이벤트 기록(좌표 키는 호출 전에 이미 버려진다). */
   recordVehicleEvent?(installId: string, ctx: Ctx): void;
+  /** 선택: 기어 D→P 한 번을 함께 다닌 길로 기록(기억 동의 없으면 null). 좌표 없음. */
+  recordTrip?(installId: string, t: Omit<TripRow, "id" | "parkedTurns">): string | null;
+  /** 선택: 방금 끝난 길에 주차 중 나눈 말 하나. */
+  addParkedTurn?(installId: string): void;
 }
 
 /** 프로세스 메모리에만 두는 저장소. 재시작하면 사라진다. */

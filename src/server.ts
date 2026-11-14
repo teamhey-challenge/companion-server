@@ -33,6 +33,8 @@ export interface ServerOptions {
   llmDeadlineMs?: number;
   /** 기억 담은 먼저 말(도착·첫 인사)이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
   proactiveLlmFirstMs?: number;
+  /** 데모 전용(COMPANION_DEMO_REGION): 차가 지역을 못 줄 때 쓰는 고정 값 "경기도 하남시". */
+  demoRegion?: string;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -134,7 +136,7 @@ export function createServer(o: ServerOptions): RunningServer {
       if (srv.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     },
-    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs, llmDeadlineMs: o.llmDeadlineMs, proactiveLlmFirstMs: o.proactiveLlmFirstMs }), maxPayloadLength: 4 * 1024 },
+    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs, llmDeadlineMs: o.llmDeadlineMs, proactiveLlmFirstMs: o.proactiveLlmFirstMs, demoRegion: o.demoRegion }), maxPayloadLength: 4 * 1024 },
   });
   const stop = server.stop.bind(server);
   server.stop = (force?: boolean) => {

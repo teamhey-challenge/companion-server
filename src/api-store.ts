@@ -14,6 +14,7 @@ import {
   type Settings,
   type SettingsPatch,
 } from "../shared/packages/protocol/src/index";
+import { buildTripsResponse, emptyTripsResponse, type Tone, type TripRow, type TripsResponse } from "./trips";
 import type { Clock } from "./clock";
 
 /** meetStage 0 처음 ~ 4 끝. lastGreetingDay는 차 시계 기준 날짜 문자열. pendingStop: "이따가 할래"로 미룬 들를 곳(유종 갈래), 다음 정차 때 한 번 챙기고 비운다. */
@@ -68,6 +69,11 @@ export class ApiStore {
       seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
     db.run("CREATE INDEX IF NOT EXISTS vehicle_events_car ON vehicle_events (install_id, seq)");
     db.run("CREATE TABLE IF NOT EXISTS talk_state (install_id TEXT PRIMARY KEY, state TEXT NOT NULL)");
+    db.run(`CREATE TABLE IF NOT EXISTS trips (
+      id TEXT PRIMARY KEY, install_id TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL,
+      distance_km REAL, destination TEXT, sido TEXT, sigungu TEXT, region_demo INTEGER NOT NULL DEFAULT 0,
+      parked_turns INTEGER NOT NULL DEFAULT 0)`);
+    db.run("CREATE INDEX IF NOT EXISTS trips_car ON trips (install_id, started_at)");
   }
 
   // ---- 동의 ----
@@ -226,8 +232,55 @@ export class ApiStore {
     return true;
   }
 
+  /** 기억을 전부 지우면 함께 다닌 길도 같이 지운다(D-37: 지우면 바로 삭제). */
   deleteAllMemory(installId: string): void {
     this.db.query("DELETE FROM memory WHERE install_id = ?1").run(installId);
+    this.deleteAllTrips(installId);
+  }
+
+  // ---- 함께 다닌 길(프로토타입). 좌표 없음. 기억 동의가 없으면 기록하지 않는다. ----
+  /** 기억 동의·설정이 있을 때만 기록한다. 기록했으면 id, 아니면 null. */
+  recordTrip(installId: string, t: Omit<TripRow, "id" | "parkedTurns">): string | null {
+    if (!this.memoryAllowed(installId)) return null;
+    const id = crypto.randomUUID();
+    this.db
+      .query("INSERT INTO trips (id, install_id, started_at, ended_at, distance_km, destination, sido, sigungu, region_demo) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)")
+      .run(id, installId, t.startedAt, t.endedAt, t.distanceKm, t.destination, t.sido, t.sigungu, t.regionDemo ? 1 : 0);
+    return id;
+  }
+
+  /** 방금 끝난 길(30분 안)에 주차 중 나눈 말 하나를 더한다. */
+  addParkedTurn(installId: string): void {
+    if (!this.memoryAllowed(installId)) return;
+    this.db
+      .query("UPDATE trips SET parked_turns = parked_turns + 1 WHERE id = (SELECT id FROM trips WHERE install_id = ?1 ORDER BY ended_at DESC LIMIT 1) AND ended_at > ?2")
+      .run(installId, this.clock.now() - 30 * 60_000);
+  }
+
+  /** 오래된 순. */
+  listTrips(installId: string): TripRow[] {
+    const rows = this.db
+      .query("SELECT id, started_at, ended_at, distance_km, destination, sido, sigungu, region_demo, parked_turns FROM trips WHERE install_id = ?1 ORDER BY started_at, rowid")
+      .all(installId) as { id: string; started_at: number; ended_at: number; distance_km: number | null; destination: string | null; sido: string | null; sigungu: string | null; region_demo: number; parked_turns: number }[];
+    return rows.map((r) => ({
+      id: r.id, startedAt: r.started_at, endedAt: r.ended_at, distanceKm: r.distance_km, destination: r.destination,
+      sido: r.sido, sigungu: r.sigungu, regionDemo: r.region_demo === 1, parkedTurns: r.parked_turns,
+    }));
+  }
+
+  tripsResponse(installId: string, tone: Tone = "serious"): TripsResponse {
+    if (!this.memoryAllowed(installId)) return emptyTripsResponse(tone);
+    const mem = this.db.query("SELECT COUNT(*) AS n FROM memory WHERE install_id = ?1").get(installId) as { n: number };
+    const fifth = this.db.query("SELECT created_at FROM memory WHERE install_id = ?1 ORDER BY seq LIMIT 1 OFFSET 4").get(installId) as { created_at: number } | null;
+    return buildTripsResponse(this.listTrips(installId), mem.n, fifth?.created_at ?? null, this.clock.now(), tone);
+  }
+
+  deleteTrip(installId: string, id: string): boolean {
+    return this.db.query("DELETE FROM trips WHERE install_id = ?1 AND id = ?2").run(installId, id).changes > 0;
+  }
+
+  deleteAllTrips(installId: string): void {
+    this.db.query("DELETE FROM trips WHERE install_id = ?1").run(installId);
   }
 
   // ---- 대화 상태(ServerTalk): 차마다 작은 JSON ----

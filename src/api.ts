@@ -15,6 +15,7 @@ import {
 import type { ApiStore, Principal } from "./api-store";
 import { characterFor } from "./api-store";
 import { bearer } from "./auth";
+import { TONES, type Tone } from "./trips";
 import type { CarStore } from "./store";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
@@ -110,7 +111,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     return json({ phoneToken: r.phoneToken, character: r.character });
   }
 
-  const known = /^\/v1\/(consents|pairings|memory|settings|vehicle-events)(\/|$)/.test(path);
+  const known = /^\/v1\/(consents|pairings|memory|settings|vehicle-events|trips)(\/|$)/.test(path);
   if (!known) return null;
 
   const who = authenticate(req, d);
@@ -171,6 +172,25 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   const mem = /^\/v1\/memory\/([^/]+)$/.exec(path);
   if (mem && m === "DELETE") {
     d.api.deleteMemory(installId, decodeURIComponent(mem[1]!));
+    return noContent();
+  }
+
+  // 함께 다닌 길(프로토타입): 폰이 읽고 지운다. 기록은 서버가 기어 D→P에서 직접 남기므로 쓰기 경로는 없다.
+  if (path === "/v1/trips") {
+    if (m === "GET") {
+      const tone = url.searchParams.get("tone") ?? "serious";
+      if (!(TONES as readonly string[]).includes(tone)) return bad();
+      return json(d.api.tripsResponse(installId, tone as Tone));
+    }
+    if (m === "DELETE") {
+      d.api.deleteAllTrips(installId);
+      return noContent();
+    }
+    return null;
+  }
+  const trip = /^\/v1\/trips\/([^/]+)$/.exec(path);
+  if (trip && m === "DELETE") {
+    d.api.deleteTrip(installId, decodeURIComponent(trip[1]!));
     return noContent();
   }
 
