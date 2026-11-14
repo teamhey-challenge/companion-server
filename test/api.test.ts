@@ -131,6 +131,24 @@ test("withdrawing record or memory consent deletes memory and summaries immediat
   expect((await call("DELETE", "/v1/consents/x", a)).status).toBe(400);
 });
 
+test("withdrawing record consent also deletes stored vehicle events and the nickname", async () => {
+  const { call, car, dbPath } = boot();
+  const a = await car("install-aaaa1");
+  await call("POST", "/v1/consents", a, { type: "record", version: "1", granted: true, channel: "car" });
+  await call("POST", "/v1/vehicle-events", a, [{ at: "2026-11-15T01:00:00Z", ctx: { gear: "D", speedKmh: 40 } }]);
+  await call("PATCH", "/v1/settings", a, { nickname: "민수" });
+  const count = () => {
+    const db = new Database(dbPath);
+    const row = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM vehicle_events WHERE install_id = 'install-aaaa1'").get();
+    db.close();
+    return row?.n ?? -1;
+  };
+  expect(count()).toBe(1);
+  expect((await call("DELETE", "/v1/consents/record", a)).status).toBe(204);
+  expect(count()).toBe(0);
+  expect(await (await call("GET", "/v1/settings", a)).json()).toMatchObject({ nickname: null });
+});
+
 test("pairing: code format, new code invalidates old, claim once, expiry, unknown", async () => {
   const { call, car, newCode, clock, current } = boot();
   const a = await car("install-aaaa1");
