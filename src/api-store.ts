@@ -22,6 +22,12 @@ export interface TalkState { meetStage: number; lastGreetingDay: string | null; 
 export const DEFAULT_TALK_STATE: TalkState = { meetStage: 0, lastGreetingDay: null, pendingStop: null };
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
+type MemRow = { seq: number; id: string; kind: MemoryKind; text: string; created_at: number };
+
+/** 같은 기억 문장인지 볼 때 쓰는 모양: 공백 뭉치기·앞뒤 공백 제거·끝 문장부호 제거. */
+export function normalizeMemoryText(text: string): string {
+  return text.replace(/\s+/g, " ").trim().replace(/[\s.!?。…~,]+$/u, "");
+}
 export const CHARACTER_NAME = "헤이파리";
 const MAX_EVENTS_PER_CAR = 200;
 
@@ -177,22 +183,31 @@ export class ApiStore {
 
   // ---- 기억 ----
   addMemory(installId: string, kind: MemoryKind, text: string): MemoryItem {
+    // 같은 차에 같은 문장(종류가 달라도)이 이미 있으면 새로 쓰지 않고 기존 항목을 돌려준다.
+    const key = normalizeMemoryText(text);
+    const rows = this.db.query("SELECT seq, id, kind, text, created_at FROM memory WHERE install_id = ?1 ORDER BY seq DESC").all(installId) as MemRow[];
+    const dup = rows.find((r) => normalizeMemoryText(r.text) === key);
+    if (dup) return { id: dup.id, kind: dup.kind, text: dup.text, createdAt: iso(dup.created_at) };
     const id = crypto.randomUUID();
     const now = this.clock.now();
     this.db.query("INSERT INTO memory (id, install_id, kind, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(id, installId, kind, text, now);
     return { id, kind, text, createdAt: iso(now) };
   }
 
-  /** 최신순. cursor는 이전 쪽 마지막 항목의 seq. */
+  /** 최신순. 같은 문장(정규화 기준)은 가장 새 것 하나만 보인다(기존 중복 행은 지우지 않는다). cursor는 이전 쪽 마지막 항목의 seq. */
   pageMemory(installId: string, cursor: number | null, limit: number): { items: MemoryItem[]; nextCursor: string | null } {
-    const rows = this.db
-      .query("SELECT seq, id, kind, text, created_at FROM memory WHERE install_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3")
-      .all(installId, cursor ?? Number.MAX_SAFE_INTEGER, limit + 1) as { seq: number; id: string; kind: MemoryKind; text: string; created_at: number }[];
-    const more = rows.length > limit;
-    const page = rows.slice(0, limit);
+    const rows = this.db.query("SELECT seq, id, kind, text, created_at FROM memory WHERE install_id = ?1 ORDER BY seq DESC").all(installId) as MemRow[];
+    const seen = new Set<string>();
+    const after = rows.filter((r) => {
+      const k = normalizeMemoryText(r.text);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return r.seq < (cursor ?? Number.MAX_SAFE_INTEGER);
+    });
+    const page = after.slice(0, limit);
     return {
       items: page.map((r) => ({ id: r.id, kind: r.kind, text: r.text, createdAt: iso(r.created_at) })),
-      nextCursor: more ? String(page[page.length - 1]!.seq) : null,
+      nextCursor: after.length > limit ? String(page[page.length - 1]!.seq) : null,
     };
   }
 
@@ -200,8 +215,15 @@ export class ApiStore {
     return this.pageMemory(installId, null, limit).items;
   }
 
+  /** 보이는 항목을 지우면 같은 문장의 쌍둥이 행도 함께 지운다(안 그러면 숨은 쪽이 다시 나타난다). */
   deleteMemory(installId: string, id: string): boolean {
-    return this.db.query("DELETE FROM memory WHERE install_id = ?1 AND id = ?2").run(installId, id).changes > 0;
+    const rows = this.db.query("SELECT id, text FROM memory WHERE install_id = ?1").all(installId) as { id: string; text: string }[];
+    const target = rows.find((r) => r.id === id);
+    if (!target) return false;
+    const key = normalizeMemoryText(target.text);
+    const del = this.db.query("DELETE FROM memory WHERE install_id = ?1 AND id = ?2");
+    for (const r of rows) if (normalizeMemoryText(r.text) === key) del.run(installId, r.id);
+    return true;
   }
 
   deleteAllMemory(installId: string): void {

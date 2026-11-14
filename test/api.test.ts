@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import type { Clock, TimerHandle } from "../src/clock";
 import { Observability } from "../src/observe";
 import { createServer, type RunningServer } from "../src/server";
+import { ApiStore } from "../src/api-store";
 
 class FakeClock implements Clock {
   t = 1_800_000_000_000;
@@ -314,4 +315,47 @@ test("vehicle events: 202 and coordinate keys dropped", async () => {
   expect(JSON.parse(row?.ctx ?? "{}")).toEqual({ gear: "D", speedKmh: 40 });
   expect((await call("POST", "/v1/vehicle-events", a, [{ at: "nope", ctx: {} }])).status).toBe(400);
   expect((await call("POST", "/v1/vehicle-events", a, { at: "x" })).status).toBe(400);
+});
+
+test("PLEOS-174: same sentence is not written twice, across kinds or with punctuation/space differences", () => {
+  const api = new ApiStore(new Database(":memory:"), new FakeClock());
+  const first = api.addMemory("i1", "summary", "퇴근길에는 조용한 대화를 좋아해요.");
+  const again = api.addMemory("i1", "fact", "  퇴근길에는  조용한 대화를 좋아해요 ");
+  expect(again.id).toBe(first.id);
+  expect(api.listMemory("i1", 10).length).toBe(1);
+  // 다른 차에는 따로 쓴다
+  api.addMemory("i2", "fact", "퇴근길에는 조용한 대화를 좋아해요.");
+  expect(api.listMemory("i2", 10).length).toBe(1);
+  expect(api.listMemory("i1", 10).length).toBe(1);
+});
+
+test("PLEOS-174: existing duplicate rows are hidden in the list (newest kept, rows untouched) and deleting the shown item removes the twin", async () => {
+  const { call, car, dbPath } = boot();
+  const a = await car("install-aaaa1");
+  const b = await car("install-bbbb1");
+  const db = new Database(dbPath);
+  const ins = (id: string, inst: string, kind: string, text: string, at: number) =>
+    db.query("INSERT INTO memory (id, install_id, kind, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(id, inst, kind, text, at);
+  ins("old", "install-aaaa1", "summary", "퇴근길에는 조용한 대화를 좋아해요.", 1);
+  ins("other", "install-aaaa1", "fact", "내일 면접이 있다", 2);
+  ins("new", "install-aaaa1", "fact", "퇴근길에는 조용한 대화를 좋아해요", 3);
+  ins("b-same", "install-bbbb1", "fact", "퇴근길에는 조용한 대화를 좋아해요.", 4);
+  const count = (inst: string) => (db.query("SELECT COUNT(*) AS n FROM memory WHERE install_id = ?1").get(inst) as { n: number }).n;
+  expect((await (await call("GET", "/v1/memory?limit=100", a)).json() as MemPage).items.map((i) => i.id)).toEqual(["new", "other"]);
+  // 목록 쪽 중복 제거는 행을 지우지 않는다
+  expect(count("install-aaaa1")).toBe(3);
+  // 쪽 나누기도 중복을 건너뛴다
+  const p1 = (await (await call("GET", "/v1/memory?limit=1", a)).json()) as MemPage;
+  expect(p1.items.map((i) => i.id)).toEqual(["new"]);
+  const p2 = (await (await call("GET", `/v1/memory?limit=1&cursor=${p1.nextCursor}`, a)).json()) as MemPage;
+  expect(p2.items.map((i) => i.id)).toEqual(["other"]);
+  expect(p2.nextCursor).toBeNull();
+  // 보이는 항목을 지우면 숨은 쌍둥이도 사라져 다시 나타나지 않는다. 다른 차는 그대로.
+  expect((await call("DELETE", "/v1/memory/new", a)).status).toBe(204);
+  expect((await memory(a)).items.map((i) => i.id)).toEqual(["other"]);
+  expect(count("install-aaaa1")).toBe(1);
+  expect(count("install-bbbb1")).toBe(1);
+  db.close();
+  async function memory(tok: string): Promise<MemPage> { return (await call("GET", "/v1/memory?limit=100", tok)).json(); }
+  void b;
 });

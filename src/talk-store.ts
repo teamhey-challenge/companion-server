@@ -1,5 +1,5 @@
 import type { Ctx, MemoryItem, MemoryKind, Settings } from "../shared/packages/protocol/src/index";
-import { DEFAULT_SETTINGS, DEFAULT_TALK_STATE, type TalkState } from "./api-store";
+import { DEFAULT_SETTINGS, DEFAULT_TALK_STATE, normalizeMemoryText, type TalkState } from "./api-store";
 
 
 /**
@@ -48,16 +48,28 @@ export class InMemoryTalkStore implements TalkStore {
     return this.talkConsent;
   }
   listMemory(id: string, limit: number): MemoryItem[] {
-    return [...(this.memory.get(id) ?? [])].reverse().slice(0, limit);
+    const seen = new Set<string>();
+    return [...(this.memory.get(id) ?? [])].reverse().filter((m) => {
+      const k = normalizeMemoryText(m.text);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }).slice(0, limit);
   }
   addMemory(id: string, kind: MemoryKind, text: string): MemoryItem {
+    const key = normalizeMemoryText(text);
+    const dup = (this.memory.get(id) ?? []).find((m) => normalizeMemoryText(m.text) === key);
+    if (dup) return dup;
     const item: MemoryItem = { id: crypto.randomUUID(), kind, text, createdAt: new Date().toISOString() };
     this.memory.set(id, [...(this.memory.get(id) ?? []), item]);
     return item;
   }
   deleteMemory(id: string, memId: string): boolean {
     const all = this.memory.get(id) ?? [];
-    const next = all.filter((m) => m.id !== memId);
+    const target = all.find((m) => m.id === memId);
+    if (!target) return false;
+    const key = normalizeMemoryText(target.text);
+    const next = all.filter((m) => normalizeMemoryText(m.text) !== key);
     this.memory.set(id, next);
     return next.length !== all.length;
   }
