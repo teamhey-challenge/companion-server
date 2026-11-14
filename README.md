@@ -1,6 +1,11 @@
 # companion-server
 
-차량 캐릭터 AI 컴패니언(임시 이름 `companion-*`)의 서버 저장소다. HEY 시절 `hey-relay@3939310`에서 재사용할 뼈대만 복사했다(원본 저장소는 그대로 보관).
+차량 캐릭터 AI 컴패니언 "헤이파리"(임시 이름 `companion-*`)의 서버 저장소다. HEY 시절 `hey-relay@3939310`에서 재사용할 뼈대만 복사했다(원본 저장소는 그대로 보관).
+
+> 공모전 제출 묶음의 일부다. 앱 이름·팀명은 아직 정해지지 않았다. 앱(APK)은 차량 앱·폰 앱 저장소의 `apk/`에 있다.
+
+- 실행: Bun + TypeScript. `bun src/index.ts`(설정은 "설정" 표, 비밀은 600 권한 파일 `~/.config/companion/server.env`).
+- 테스트 환경: `bun run check`(단위 시험 + tsc)는 외부 키 없이 돈다. 실제 LLM·TTS 호출은 키가 있는 환경에서만 `scripts/smoke.ts`로 확인한다. 운영 서버는 팀이 운영하는 `https://hey.lastmile.ltd/api`다.
 
 음성 인식(STT)은 차량의 Pleos 내장 서비스가 맡아 서버는 마이크 오디오를 받지 않는다. 서버는 대화 텍스트를 받아 LLM을 부르고, 답을 글자와 TTS 오디오(PCM)로 돌려준다. 기본 LLM은 OmniRoute(OpenAI 호환) `chat-fast`다.
 
@@ -81,5 +86,12 @@ bun run scripts/smoke.ts "오늘 비 와서 천천히 갈게"   # 실제 LLM 한
 
 ## 링크·라이선스
 
-- 차량 앱: [companion-car](https://github.com/darren-pleos-challenge/companion-car), 폰 웹: [companion-web](https://github.com/darren-pleos-challenge/companion-web)
+| 저장소 | 내용 |
+|---|---|
+| [companion-car](https://github.com/darren-pleos-challenge/companion-car) | 차량 앱 |
+| [companion-phone](https://github.com/darren-pleos-challenge/companion-phone) | 폰 앱(QR 연결·동의·기억 관리) |
+| [companion-server](https://github.com/darren-pleos-challenge/companion-server) | 대화·기억·TTS 서버(이 저장소) |
+| [companion-web](https://github.com/darren-pleos-challenge/companion-web) | 폰 웹(폰 앱의 백업)·디자인 시스템 Storybook |
+| [companion-shared](https://github.com/darren-pleos-challenge/companion-shared) | 디자인 토큰·프로토콜(서브모듈 `shared/`) |
+
 - 코드는 MIT(`LICENSE`). 외부 서비스·라이브러리 고지는 `THIRD_PARTY.md`.
