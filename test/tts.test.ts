@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type RunningServer } from "../src/server";
 import { Observability } from "../src/observe";
-import { L, pick } from "../src/lines";
+import { L, fixedPieces, pick, primePieces } from "../src/lines";
 import { AudioPipeline, BreezeTts, FakeTts, GatedTts, PhraseCache, Semaphore, SentenceSplitter, loadTtsConfig, TtsError, type TtsProvider } from "../src/tts";
 
 describe("SentenceSplitter", () => {
@@ -42,11 +42,27 @@ describe("AudioPipeline", () => {
     expect(await run(fake, ["첫 문장입니다.", "둘째 문장입니다."])).toEqual(["start", "chunk1", "chunk2", "chunk3", "chunk1", "chunk2", "chunk3"]);
     expect(fake.calls).toEqual(["첫 문장입니다.", "둘째 문장입니다."]);
   });
-  test("at most 2 generations at once", async () => {
+  test("one turn asks the provider for one sentence at a time, in order", async () => {
     const fake = new FakeTts(5);
     await run(fake, ["문장 하나입니다.", "문장 둘입니다.", "문장 셋입니다.", "문장 넷입니다."]);
-    expect(fake.calls.length).toBe(4);
+    expect(fake.calls).toEqual(["문장 하나입니다.", "문장 둘입니다.", "문장 셋입니다.", "문장 넷입니다."]);
+    expect(fake.maxActive).toBe(1);
+  });
+  test("two turns at once use the two provider slots without queueing", async () => {
+    const lines: string[] = [];
+    const fake = new FakeTts(5);
+    const gated = new GatedTts(fake, new Semaphore(2), new Observability((l) => lines.push(l)));
+    const turn = async () => {
+      const ac = new AbortController();
+      const p = new AudioPipeline(gated, ac.signal, { onStart: () => {}, onChunk: () => {}, onError: () => {} });
+      p.add("첫 문장입니다.");
+      p.add("둘째 문장입니다.");
+      p.finish();
+      await p.done;
+    };
+    await Promise.all([turn(), turn()]);
     expect(fake.maxActive).toBe(2);
+    expect(lines.some((l) => l.includes('"tts.queue_wait"'))).toBe(false);
   });
   test("background priming leaves a slot for real turns and never exceeds the limit", async () => {
     const fake = new FakeTts(8);
@@ -86,6 +102,22 @@ describe("AudioPipeline", () => {
     await cache.prime(["둘째 문장입니다.", "셋째 문장입니다."]);
     expect(cache.size.entries).toBe(2);
     expect(cache.cached("음… 잠깐만!")).toBe(false);
+  });
+  test("remembered phrases are cached on first use (lazy): one provider call, then served from memory", async () => {
+    const fake = new FakeTts();
+    const cache = new PhraseCache(new GatedTts(fake, new Semaphore(2), new Observability(() => {})), "v1");
+    cache.remember(["도착했어요, 또 봬요!"]);
+    expect(cache.cached("도착했어요, 또 봬요!")).toBe(false);
+    for (let i = 0; i < 3; i++) for await (const _ of await cache.synth("도착했어요, 또 봬요!", new AbortController().signal)) void _;
+    expect(fake.calls).toEqual(["도착했어요, 또 봬요!"]);
+    expect(cache.cached("도착했어요, 또 봬요!")).toBe(true);
+  });
+  test("startup priming is limited to 10 pieces and includes the filler, even though many more are remembered", () => {
+    const prime = primePieces();
+    expect(prime.length).toBeLessThanOrEqual(10);
+    expect(prime).toContain(L.thinking.banmal);
+    expect(fixedPieces().length).toBeGreaterThan(prime.length);
+    for (const p of prime) expect(fixedPieces()).toContain(p);
   });
   test("prime stops after two failures in a row", async () => {
     const bad: TtsProvider = {

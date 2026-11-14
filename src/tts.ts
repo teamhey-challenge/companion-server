@@ -337,13 +337,18 @@ export class PhraseCache implements TtsProvider {
     }
   }
 
+  /** 이 문장들은 처음 말할 때 캐시에 담는다(미리 합성하지는 않는다). 공급사 호출을 늘리지 않고 두 번째부터 즉시 나가게 한다. */
+  remember(texts: string[]): void {
+    for (const t of texts) this.keep.add(t);
+  }
+
   /**
    * 문장을 하나씩 합성해 담는다. 배경 작업이라 실제 턴이 쓸 자리를 남기고(자리가 둘 다 비었을 때만 하나 쓴다), 연속 2번 실패하면 멈춘다(키·크레딧 문제일 수 있다).
-   * first 에 든 문장을 먼저 만든다(채움말처럼 서버가 뜨자마자 필요한 것).
+   * 배포마다 도는 일이라 호출 수를 아끼려고 호출하는 쪽이 고른 소수만 넣는다.
    */
-  async prime(texts: string[], signal: AbortSignal = new AbortController().signal, first: string[] = []): Promise<{ done: number; failed: number; entries: number; bytes: number }> {
-    const order = [...new Set([...first, ...texts])];
-    for (const t of order) this.keep.add(t);
+  async prime(texts: string[], signal: AbortSignal = new AbortController().signal): Promise<{ done: number; failed: number; entries: number; bytes: number }> {
+    const order = [...new Set(texts)];
+    this.remember(order);
     let done = 0;
     let failed = 0;
     let streak = 0;
@@ -449,6 +454,7 @@ export class AudioPipeline {
   private closed = false;
   /** 어떤 문장이든 실패하면 더 이상 TTS 를 요청하지 않는다(크레딧 낭비 방지). */
   private failed = false;
+  private tail: Promise<void> = Promise.resolve();
   private kick: (() => void) | undefined;
   readonly done: Promise<void>;
 
@@ -462,11 +468,15 @@ export class AudioPipeline {
     signal.addEventListener("abort", () => this.finish(), { once: true });
   }
 
+  /**
+   * 한 턴은 공급사에 동시에 한 요청만 보낸다: 앞 조각의 합성이 끝난 뒤에 다음 조각을 시작한다. 그래야 동시 생성 2자리가 두 턴을 받친다.
+   * (조각 1의 오디오가 재생되는 동안 조각 2를 만들어도 늦지 않는다. 캐시된 조각은 바로 끝난다.)
+   */
   add(sentence: string, filler = false): void {
     if (this.failed) return;
     const job: Job = { chunks: [], done: false, error: undefined, wake: undefined, filler };
     this.jobs.push(job);
-    void this.generate(job, sentence);
+    this.tail = this.tail.then(() => this.generate(job, sentence));
     this.kick?.();
   }
 
@@ -478,6 +488,11 @@ export class AudioPipeline {
 
   private async generate(job: Job, sentence: string): Promise<void> {
     const notify = () => job.wake?.();
+    if (this.failed || this.signal.aborted) {
+      job.done = true;
+      notify();
+      return;
+    }
     try {
       for await (const c of await this.tts.synth(sentence, this.signal)) {
         if (this.signal.aborted) break;
