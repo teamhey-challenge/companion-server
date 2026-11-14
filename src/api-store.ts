@@ -1,0 +1,234 @@
+import type { Database } from "bun:sqlite";
+import { createHash, randomBytes, randomInt } from "node:crypto";
+import {
+  PAIR_CODE_ALPHABET,
+  PAIR_CODE_LENGTH,
+  PAIR_CODE_TTL_SEC,
+  type CharacterInfo,
+  type ConsentRecord,
+  type ConsentType,
+  type CurrentPairingResponse,
+  type MemoryItem,
+  type MemoryKind,
+  type PublicPairingStatus,
+  type Settings,
+  type SettingsPatch,
+} from "../shared/packages/protocol/src/index";
+import type { Clock } from "./clock";
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+const iso = (ms: number) => new Date(ms).toISOString();
+export const CHARACTER_NAME = "헤이파리";
+const MAX_EVENTS_PER_CAR = 200;
+
+export const DEFAULT_SETTINGS: Settings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null };
+
+export type Principal = { kind: "car" | "phone"; installId: string };
+
+/** 차마다 같은 캐릭터 몸 색(0|1). installId 해시에서 정한다. */
+export function characterFor(installId: string | null): CharacterInfo {
+  const bodyColor = installId ? ((parseInt(sha256(installId).slice(0, 2), 16) & 1) as 0 | 1) : 0;
+  return { name: CHARACTER_NAME, bodyColor };
+}
+
+export type ClaimResult =
+  | { ok: true; phoneToken: string; character: CharacterInfo }
+  | { ok: false; reason: "unknown" | "claimed" | "expired" };
+
+/**
+ * 동의·페어링·기억·설정·차량 이벤트 저장소(같은 sqlite 파일). 동기 API(bun:sqlite).
+ * 폰 토큰은 해시로만 저장한다. 기억 쓰기 포트(addMemory 등)는 ServerTalk의 TalkStore 모양과 같다.
+ */
+export class ApiStore {
+  constructor(private readonly db: Database, private readonly clock: Clock) {
+    db.run(`CREATE TABLE IF NOT EXISTS consents (
+      install_id TEXT NOT NULL, type TEXT NOT NULL, version TEXT NOT NULL, granted INTEGER NOT NULL, at INTEGER NOT NULL,
+      PRIMARY KEY (install_id, type))`);
+    db.run(`CREATE TABLE IF NOT EXISTS pairings (
+      code TEXT PRIMARY KEY, install_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+      claimed_at INTEGER, phone_hash TEXT UNIQUE)`);
+    db.run("CREATE INDEX IF NOT EXISTS pairings_car ON pairings (install_id, created_at)");
+    db.run(`CREATE TABLE IF NOT EXISTS memory (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, install_id TEXT NOT NULL,
+      kind TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+    db.run("CREATE INDEX IF NOT EXISTS memory_car ON memory (install_id, seq)");
+    db.run(`CREATE TABLE IF NOT EXISTS settings (
+      install_id TEXT PRIMARY KEY, proactive TEXT NOT NULL, memory_enabled INTEGER NOT NULL, speech TEXT NOT NULL, nickname TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS vehicle_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
+    db.run("CREATE INDEX IF NOT EXISTS vehicle_events_car ON vehicle_events (install_id, seq)");
+  }
+
+  // ---- 동의 ----
+  listConsents(installId: string): ConsentRecord[] {
+    const rows = this.db.query("SELECT type, version, granted, at FROM consents WHERE install_id = ?1 ORDER BY at, type").all(installId) as {
+      type: ConsentType; version: string; granted: number; at: number;
+    }[];
+    return rows.map((r) => ({ type: r.type, version: r.version, granted: r.granted === 1, at: iso(r.at) }));
+  }
+
+  /** record·memory 철회는 그 차의 기억과 요약을 바로 지운다. memory 철회는 기억 기능도 끈다. */
+  setConsent(installId: string, type: ConsentType, version: string, granted: boolean): void {
+    this.db
+      .query(
+        `INSERT INTO consents (install_id, type, version, granted, at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(install_id, type) DO UPDATE SET version = ?3, granted = ?4, at = ?5`,
+      )
+      .run(installId, type, version, granted ? 1 : 0, this.clock.now());
+    if (!granted && (type === "record" || type === "memory")) {
+      this.deleteAllMemory(installId);
+      if (type === "memory") this.patchSettings(installId, { memoryEnabled: false });
+    }
+  }
+
+  /** 철회. 동의 기록이 없었으면 version "-"으로 철회 기록을 남긴다. */
+  withdrawConsent(installId: string, type: ConsentType): void {
+    const row = this.db.query("SELECT version FROM consents WHERE install_id = ?1 AND type = ?2").get(installId, type) as { version: string } | null;
+    this.setConsent(installId, type, row?.version ?? "-", false);
+  }
+
+  private consentGranted(installId: string, type: ConsentType): boolean | null {
+    const r = this.db.query("SELECT granted FROM consents WHERE install_id = ?1 AND type = ?2").get(installId, type) as { granted: number } | null;
+    return r ? r.granted === 1 : null;
+  }
+
+  // ---- 페어링 ----
+  /** 새 코드를 만들고 이 차의 앞선 대기 코드는 바로 만료시킨다. */
+  createPairing(installId: string): { pairCode: string; expiresAt: string } {
+    const now = this.clock.now();
+    this.db.query("UPDATE pairings SET expires_at = ?2 WHERE install_id = ?1 AND claimed_at IS NULL AND expires_at > ?2").run(installId, now);
+    const expires = now + PAIR_CODE_TTL_SEC * 1000;
+    for (let i = 0; i < 20; i++) {
+      const code = Array.from({ length: PAIR_CODE_LENGTH }, () => PAIR_CODE_ALPHABET[randomInt(PAIR_CODE_ALPHABET.length)]).join("");
+      try {
+        this.db.query("INSERT INTO pairings (code, install_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)").run(code, installId, now, expires);
+        this.prunePairings(now);
+        return { pairCode: code, expiresAt: iso(expires) };
+      } catch {
+        /* 코드 충돌: 다시 뽑는다 */
+      }
+    }
+    throw new Error("pair code generation failed");
+  }
+
+  private prunePairings(now: number): void {
+    this.db.query("DELETE FROM pairings WHERE claimed_at IS NULL AND expires_at < ?1").run(now - 24 * 3600_000);
+  }
+
+  currentPairing(installId: string): CurrentPairingResponse {
+    const now = this.clock.now();
+    const claimed = this.db.query("SELECT claimed_at FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL ORDER BY claimed_at DESC LIMIT 1").get(installId) as { claimed_at: number } | null;
+    const latest = this.db.query("SELECT code, expires_at, claimed_at FROM pairings WHERE install_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1").get(installId) as
+      | { code: string; expires_at: number; claimed_at: number | null } | null;
+    if (latest && latest.claimed_at === null && latest.expires_at > now) {
+      return { status: "pending", pairCode: latest.code, expiresAt: iso(latest.expires_at) };
+    }
+    if (claimed) return { status: "claimed", pairedAt: iso(claimed.claimed_at) };
+    if (latest) return { status: "expired", pairCode: latest.code, expiresAt: iso(latest.expires_at) };
+    return { status: "none" };
+  }
+
+  publicPairing(code: string): { status: PublicPairingStatus; installId: string | null } {
+    const r = this.db.query("SELECT install_id, expires_at, claimed_at FROM pairings WHERE code = ?1").get(code) as
+      | { install_id: string; expires_at: number; claimed_at: number | null } | null;
+    if (!r) return { status: "unknown", installId: null };
+    if (r.claimed_at !== null) return { status: "claimed", installId: r.install_id };
+    return { status: r.expires_at > this.clock.now() ? "pending" : "expired", installId: r.install_id };
+  }
+
+  /** 한 차에 폰 하나: 이전에 연결된 폰 토큰은 무효가 된다. */
+  claimPairing(code: string, record: boolean, memory: boolean): ClaimResult {
+    const p = this.publicPairing(code);
+    if (p.status !== "pending" || !p.installId) return { ok: false, reason: p.status === "pending" ? "unknown" : p.status };
+    const installId = p.installId;
+    const now = this.clock.now();
+    const phoneToken = randomBytes(32).toString("base64url");
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL").run(installId);
+      this.db.query("UPDATE pairings SET claimed_at = ?2, phone_hash = ?3 WHERE code = ?1").run(code, now, sha256(phoneToken));
+      this.setConsent(installId, "record", "phone-claim", record);
+      this.setConsent(installId, "memory", "phone-claim", memory);
+    })();
+    return { ok: true, phoneToken, character: characterFor(installId) };
+  }
+
+  /** 연결 해제: 폰 토큰과 대기 코드를 지운다. 기억은 남긴다. */
+  unpair(installId: string): void {
+    this.db.query("DELETE FROM pairings WHERE install_id = ?1").run(installId);
+  }
+
+  phoneLookup(token: string): string | null {
+    const r = this.db.query("SELECT install_id FROM pairings WHERE phone_hash = ?1").get(sha256(token)) as { install_id: string } | null;
+    return r?.install_id ?? null;
+  }
+
+  // ---- 기억 ----
+  addMemory(installId: string, kind: MemoryKind, text: string): MemoryItem {
+    const id = crypto.randomUUID();
+    const now = this.clock.now();
+    this.db.query("INSERT INTO memory (id, install_id, kind, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(id, installId, kind, text, now);
+    return { id, kind, text, createdAt: iso(now) };
+  }
+
+  /** 최신순. cursor는 이전 쪽 마지막 항목의 seq. */
+  pageMemory(installId: string, cursor: number | null, limit: number): { items: MemoryItem[]; nextCursor: string | null } {
+    const rows = this.db
+      .query("SELECT seq, id, kind, text, created_at FROM memory WHERE install_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3")
+      .all(installId, cursor ?? Number.MAX_SAFE_INTEGER, limit + 1) as { seq: number; id: string; kind: MemoryKind; text: string; created_at: number }[];
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    return {
+      items: page.map((r) => ({ id: r.id, kind: r.kind, text: r.text, createdAt: iso(r.created_at) })),
+      nextCursor: more ? String(page[page.length - 1]!.seq) : null,
+    };
+  }
+
+  listMemory(installId: string, limit: number): MemoryItem[] {
+    return this.pageMemory(installId, null, limit).items;
+  }
+
+  deleteMemory(installId: string, id: string): boolean {
+    return this.db.query("DELETE FROM memory WHERE install_id = ?1 AND id = ?2").run(installId, id).changes > 0;
+  }
+
+  deleteAllMemory(installId: string): void {
+    this.db.query("DELETE FROM memory WHERE install_id = ?1").run(installId);
+  }
+
+  // ---- 설정 ----
+  getSettings(installId: string): Settings {
+    const r = this.db.query("SELECT proactive, memory_enabled, speech, nickname FROM settings WHERE install_id = ?1").get(installId) as
+      | { proactive: Settings["proactive"]; memory_enabled: number; speech: Settings["speech"]; nickname: string | null } | null;
+    if (!r) return { ...DEFAULT_SETTINGS };
+    return { proactive: r.proactive, memoryEnabled: r.memory_enabled === 1, speech: r.speech, nickname: r.nickname };
+  }
+
+  patchSettings(installId: string, patch: SettingsPatch): Settings {
+    const s = { ...this.getSettings(installId), ...patch };
+    this.db
+      .query(
+        `INSERT INTO settings (install_id, proactive, memory_enabled, speech, nickname) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(install_id) DO UPDATE SET proactive = ?2, memory_enabled = ?3, speech = ?4, nickname = ?5`,
+      )
+      .run(installId, s.proactive, s.memoryEnabled ? 1 : 0, s.speech, s.nickname);
+    return s;
+  }
+
+  /** 기억 동의(철회 안 함)와 설정 모두 켜져 있고 녹음 동의도 철회되지 않았을 때만 기억을 쓰고 읽는다. */
+  memoryAllowed(installId: string): boolean {
+    return this.consentGranted(installId, "memory") === true && this.consentGranted(installId, "record") !== false && this.getSettings(installId).memoryEnabled;
+  }
+
+  // ---- 차량 이벤트(좌표는 호출 전에 버린다) ----
+  recordVehicleEvent(installId: string, ctx: Record<string, unknown>, at: string = iso(this.clock.now())): void {
+    this.db.query("INSERT INTO vehicle_events (install_id, at, ctx) VALUES (?1, ?2, ?3)").run(installId, at, JSON.stringify(ctx));
+    this.db
+      .query("DELETE FROM vehicle_events WHERE install_id = ?1 AND seq <= (SELECT seq FROM vehicle_events WHERE install_id = ?1 ORDER BY seq DESC LIMIT 1 OFFSET ?2)")
+      .run(installId, MAX_EVENTS_PER_CAR);
+  }
+
+  lastVehicleContext(installId: string): Record<string, unknown> | null {
+    const r = this.db.query("SELECT ctx FROM vehicle_events WHERE install_id = ?1 ORDER BY seq DESC LIMIT 1").get(installId) as { ctx: string } | null;
+    return r ? (JSON.parse(r.ctx) as Record<string, unknown>) : null;
+  }
+}

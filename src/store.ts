@@ -11,7 +11,7 @@ const secret = () => randomBytes(32).toString("base64url");
 
 /** 등록된 차량(installId → carToken 해시) 영속 저장. 토큰 원문은 저장하지 않는다. */
 export class CarStore {
-  private readonly db: Database;
+  readonly db: Database;
 
   constructor(path: string, private readonly clock: Clock) {
     if (path !== ":memory:") mkdirSync(path.replace(/\/[^/]*$/, "") || ".", { recursive: true });
