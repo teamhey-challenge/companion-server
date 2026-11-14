@@ -202,6 +202,21 @@ describe("proactive decision", () => {
     car.close();
   });
 
+  test("F2: a car that refuses the first line (no consent yet) is asked again right after it consents", async () => {
+    const car = await Car.connect(boot(newLlm()));
+    car.ctx({ gear: "P", speedKmh: 0 });
+    await car.until((f) => f.some((x) => x.type === "proactive"));
+    const first = proactives(car)[0]!;
+    // the app was on the consent screen: it cancels the line
+    car.send({ type: "turn.cancel", turnId: first.id });
+    await Bun.sleep(80);
+    await car.consent("record");
+    await car.until((f) => f.filter((x) => x.type === "proactive").length === 2, 4000);
+    expect(proactives(car).map((p) => p.reason)).toEqual(["meet", "meet"]);
+    expect(proactives(car)[1]!.id).not.toBe(first.id);
+    car.close();
+  });
+
   test("F3: after the first meeting there is no second greeting the same day, but the next day greets with the default line", async () => {
     const real = new SystemClock();
     let offset = 0;

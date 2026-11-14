@@ -25,6 +25,8 @@ const FIRST_CLAUSE_MIN = 8;
 /** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
 const QUIET_AFTER_REPLY_MS = 6000;
 const RECENT_TURNS = 6;
+/** 동의가 기록된 뒤 막혔던 첫 만남을 다시 거는 데까지(차 앱이 동의를 저장할 시간). */
+const CONSENT_RETRY_MS = 1500;
 const PROACTIVE_MAX_TOKENS = 80;
 
 export interface TalkConfig {
@@ -60,6 +62,8 @@ interface Turn {
   running: boolean;
   /** 서버가 먼저 시작한 턴(사용자 입력 없음) */
   proactive?: boolean;
+  /** 먼저 말 걸기 턴이면 그 이유 */
+  reason?: Reason;
 }
 
 /** 연결 하나의 메모리 상태. 저장하지 않는다. */
@@ -69,9 +73,14 @@ interface Conn {
   pro: ProState;
   recent: { u: string; a: string }[];
   arrival?: TimerHandle;
+  /** 첫 만남·인사를 차 앱이 거절했다: 동의가 기록되면 다시 건다. */
+  retryFirstStop?: boolean;
+  retryTimer?: TimerHandle;
   /** 마지막 답에 끼워 넣은 기억(그거 잊어줘의 "그거") */
   lastMemoryId?: string;
   quietUntil: number;
+  /** 마지막으로 시작한 먼저 말 걸기(차 앱이 거절하면 되돌리기 위해) */
+  lastPro?: { id: string; reason: Reason };
 }
 
 /** 업그레이드 때 붙이는 연결별 데이터. 티켓에서 온 installId·sessionId와 현재 턴 상태를 든다. */
@@ -89,6 +98,8 @@ export type Ws = { send(s: string | Uint8Array): unknown; close(code?: number, r
 /** 차(installId)별 열린 소켓. 폰이나 목소리로 설정이 바뀌면 차 앱에 settings 프레임을 보낸다. */
 export class TalkHub {
   private readonly socks = new Map<string, Set<Ws>>();
+  /** talkHandlers가 붙인다: 차가 동의를 막 기록했을 때 그 차의 소켓마다 부른다. */
+  onConsent?: (ws: Ws) => void;
   add(ws: Ws): void {
     const set = this.socks.get(ws.data.installId) ?? new Set<Ws>();
     set.add(ws);
@@ -102,6 +113,9 @@ export class TalkHub {
   pushSettings(installId: string, settings: Settings): void {
     const msg = JSON.stringify({ type: "settings", settings } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
+  }
+  consentGranted(installId: string): void {
+    for (const ws of this.socks.get(installId) ?? []) this.onConsent?.(ws);
   }
 }
 
@@ -424,12 +438,58 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const c = conn(d);
     if (d.turn || clock.now() < c.quietUntil) return false;
     if (plan.llm && !cfg.apiKey) return false;
-    const t: Turn = { id: `p-${crypto.randomUUID().slice(0, 12)}`, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
+    const t: Turn = { id: `p-${crypto.randomUUID().slice(0, 12)}`, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true, reason };
     d.turn = t;
+    c.lastPro = { id: t.id, reason };
     send(ws, { type: "proactive", id: t.id, reason });
     observer.event("talk.proactive", { reason });
     void deliver(ws, t, plan);
     return true;
+  }
+
+  /**
+   * 차 앱이 먼저 말 걸기를 받지 않았다(동의 전, 대화 중, 내비 중). 첫 만남·인사는 말하지 않은 것으로 되돌려
+   * 다음 기회(동의 직후, 다음 P)에 다시 건다. 이벤트·도착은 그냥 버린다.
+   */
+  function refused(ws: Ws, turnId: string): void {
+    const c = conn(ws.data);
+    if (c.lastPro?.id !== turnId) return;
+    const { reason } = c.lastPro;
+    c.lastPro = undefined;
+    // 거절된 말은 들리지 않았으니 "방금 말했다"는 조용한 시간도 없던 일로 한다.
+    c.quietUntil = 0;
+    observer.event("talk.proactive_refused", { reason });
+    if (reason === "meet") {
+      store.patchTalkState(ws.data.installId, { meetStage: 0, lastGreetingDay: null });
+      c.retryFirstStop = true;
+    } else if (reason === "greeting") {
+      store.patchTalkState(ws.data.installId, { lastGreetingDay: null });
+      c.retryFirstStop = true;
+    }
+  }
+
+  /** 첫 정차: 첫 만남 질문(F2) 또는 오늘 첫 인사. 시작할 때와 동의가 막 기록됐을 때 부른다. */
+  function firstStop(ws: Ws, cur: Ctx): void {
+    const d = ws.data;
+    const c = conn(d);
+    const pro = c.pro;
+    const now = clock.now();
+    pro.greetChecked = true;
+    const s = store.getSettings(d.installId);
+    if (intervalMs(s.proactive) === null || cur.naviGuiding === true) return;
+    const st = store.getTalkState(d.installId);
+    if (st.meetStage === 0) {
+      if (startProactive(ws, "meet", fixed(meetQuestion(1, s), s.speech, "", false))) {
+        store.patchTalkState(d.installId, { meetStage: 1, lastGreetingDay: kstDay(now) });
+      } else pro.greetChecked = false;
+      return;
+    }
+    // 질문을 받고도 답이 없었던 첫 만남은 기본값으로 끝낸다("무응답이면 기본값").
+    if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
+    const today = kstDay(now);
+    if (st.lastGreetingDay !== today && startProactive(ws, "greeting", greetingPlan(ws, s, cur))) {
+      store.patchTalkState(d.installId, { lastGreetingDay: today });
+    }
   }
 
   const clearArrival = (c: Conn) => {
@@ -505,22 +565,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     // 기어 P로 바뀜: 첫 정차(인사·첫 만남) 또는 도착(3초 뒤 한마디)
     if (gearP && prev.gear !== "P") {
       if (baseline && !pro.greetChecked) {
-        pro.greetChecked = true;
-        if (gap !== null && !navi) {
-          const st = store.getTalkState(d.installId);
-          if (st.meetStage === 0) {
-            if (startProactive(ws, "meet", fixed(meetQuestion(1, s), s.speech, "", false))) {
-              store.patchTalkState(d.installId, { meetStage: 1, lastGreetingDay: kstDay(now) });
-            }
-            return;
-          }
-          // 질문을 받고도 답이 없었던 첫 만남은 기본값으로 끝낸다("무응답이면 기본값").
-          if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
-          const today = kstDay(now);
-          if (st.lastGreetingDay !== today && startProactive(ws, "greeting", greetingPlan(ws, s, cur))) {
-            store.patchTalkState(d.installId, { lastGreetingDay: today });
-          }
-        }
+        firstStop(ws, cur);
         return;
       }
       if (pro.drove) {
@@ -556,6 +601,18 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     }
   }
 
+  // 동의가 막 기록됐다: 첫 정차의 말을 차 앱이 거절했었다면(동의 전) 지금 다시 건다.
+  hub.onConsent = (ws) => {
+    const c = ws.data.conn;
+    if (!c?.retryFirstStop) return;
+    c.retryTimer = clock.setTimeout(() => {
+      c.retryTimer = undefined;
+      if (!c.retryFirstStop || c.pro.drove || ws.data.turn || !isParked(c.ctx)) return;
+      c.retryFirstStop = false;
+      firstStop(ws, c.ctx);
+    }, CONSENT_RETRY_MS);
+  };
+
   return {
     open(ws: Ws) {
       hub.add(ws);
@@ -563,7 +620,10 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     },
     close(ws: Ws) {
       hub.remove(ws);
-      if (ws.data.conn) clearArrival(ws.data.conn);
+      if (ws.data.conn) {
+        clearArrival(ws.data.conn);
+        if (ws.data.conn.retryTimer) clock.clearTimeout(ws.data.conn.retryTimer);
+      }
       cancel(ws.data);
     },
     async message(ws: Ws, data: string | Buffer | ArrayBuffer | Uint8Array) {
@@ -605,6 +665,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
           return;
         }
         case "turn.cancel":
+          refused(ws, f.turnId);
           return cancel(d, f.turnId);
         case "turn.end": {
           const t = d.turn;

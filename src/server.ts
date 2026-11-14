@@ -108,6 +108,7 @@ export function createServer(o: ServerOptions): RunningServer {
           talkHub.pushSettings(id, s);
           o.hub?.pushSettings(id, s);
         },
+        consentGranted: (id) => talkHub.consentGranted(id),
         throttled,
         publicPerMin: o.publicPerMin ?? 20,
         reject: (r) => o.observer.reject(r),
