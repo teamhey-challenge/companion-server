@@ -226,8 +226,8 @@ describe("turns", () => {
     c.send({ type: "turn.end", turnId: "t1" });
     await c.until((f) => f.some((x) => x.type === "reply.end"));
     const body = s.seen.system[0]!;
-    expect(body).toContain("gear=P");
-    expect(body).toContain("rangeKm=90");
+    expect(body).toContain("정차(P)");
+    expect(body).toContain("주행가능거리 90km");
     expect(body).not.toMatch(/37\.5|127\.1|lat=|longitude|location/);
     c.ws.close();
   });
