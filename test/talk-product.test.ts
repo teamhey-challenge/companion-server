@@ -668,6 +668,21 @@ describe("memory", () => {
     car.close();
   });
 
+  test("PLEOS-174: the same sentence extracted again (even as another kind) is not stored twice", async () => {
+    const llm = newLlm();
+    llm.extraction = "FACT: 퇴근길에는 조용한 대화를 좋아해요";
+    const car = await readyCar(llm);
+    await car.say("퇴근길에는 조용히 가는 게 좋아", "d1");
+    for (let i = 0; i < 100 && (await car.memory()).length === 0; i++) await Bun.sleep(20);
+    llm.extraction = "SUMMARY: 퇴근길에는 조용한 대화를 좋아해요.";
+    llm.extractCalls = 0;
+    await car.say("퇴근할 때는 말 없이 가고 싶어", "d2");
+    for (let i = 0; i < 100 && llm.extractCalls === 0; i++) await Bun.sleep(20);
+    await Bun.sleep(100);
+    expect((await car.memory()).map((m) => m.text)).toEqual(["퇴근길에는 조용한 대화를 좋아해요"]);
+    car.close();
+  });
+
   test("memoryEnabled=false: nothing is written and nothing is recalled (AC-4.7-03)", async () => {
     const llm = newLlm();
     llm.extraction = "FACT: 내일 면접이 있다";
