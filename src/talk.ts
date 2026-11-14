@@ -12,7 +12,7 @@ import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
-import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap } from "./sentence-cap";
+import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap, splitSentences } from "./sentence-cap";
 import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -297,16 +297,28 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     /** 문장 수 상한(주행 중 2, 정차 중 4): LLM 답에만 건다. 상한째 문장이 끝나면 capped=true 로 스트림을 끊고 말한 만큼만 남긴다. */
     const cap = plan.llm ? new SentenceCap(plan.driving ? DRIVING_MAX_SENTENCES : PARKED_MAX_SENTENCES) : null;
     let capped = false;
+    let sawCant = false;
     /** 조각마다 출력 필터. unsafe 면 true(나머지 출력을 버리고 화제 전환 문장으로 끝낸다). */
     const feed = (pieces: string[]): boolean => {
       for (const p of pieces) {
         if (capped) break;
-        const v = checkOutput(p, plan.driving);
-        if (v === "drop") continue;
+        // 출력 필터는 문장 단위로 먼저 걸러 내고, 살아남은 문장만 상한에 센다(걸러진 문장이 상한을 잡아먹지 않게).
+        const v = checkOutput(p, plan.driving, plan.userText);
         if (v === "unsafe") return true;
-        const r = cap ? cap.take(p) : { text: p, done: false };
-        if (r.text) say(r.text);
-        if (r.done) capped = true;
+        const kept = v === "ok" ? [p] : splitSentences(p).filter((s) => {
+          const sv = checkOutput(s, plan.driving, plan.userText);
+          if (sv === "cant") sawCant = true;
+          return sv === "ok";
+        });
+        if (v === "cant") sawCant = true;
+        for (const s of kept) {
+          const r = cap ? cap.take(s) : { text: s, done: false };
+          if (r.text) say(r.text);
+          if (r.done) {
+            capped = true;
+            break;
+          }
+        }
       }
       return false;
     };
@@ -362,8 +374,8 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       check();
       if (!unsafe) unsafe = feed(splitter.flush());
       if (unsafe || spoken.length === 0) {
-        observer.event("talk.output_filtered", { unsafe: Number(unsafe) });
-        say(redirectLine(plan.speech));
+        observer.event("talk.output_filtered", { unsafe: Number(unsafe), cant: Number(sawCant) });
+        say(sawCant && !unsafe ? pick(L.cantDo, plan.speech) : redirectLine(plan.speech));
       }
       pipeline?.finish();
       await pipeline?.done;

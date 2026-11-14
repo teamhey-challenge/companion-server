@@ -49,18 +49,26 @@ export function refusalLine(kind: SafetyKind, speech: SpeechStyle): string {
   }
 }
 
-/** 출력 조각 하나의 판정. unsafe = 이후 출력 중단 후 대체 문장, drop = 이 조각만 버림. */
-export type OutputVerdict = "ok" | "unsafe" | "drop";
+/** 출력 조각 하나의 판정. unsafe = 이후 출력 중단 후 대체 문장, drop = 이 조각만 버림, cant = 앱이 못 하는 일을 해 주겠다는 문장(버리고, 답이 비면 못 한다고 정직하게 말한다). */
+export type OutputVerdict = "ok" | "unsafe" | "drop" | "cant";
 
 const OUT_UNSAFE = /(속도.{0,6}(올려|높여|밟아)|과속(해|하자|해도)|신호.{0,6}(무시해|무시하고\s*가|그냥\s*지나가)|술.{0,6}(마시고|먹고).{0,8}운전.{0,4}(해도|괜찮|하자)|졸려도.{0,8}(그냥\s*)?(달려|계속\s*가)|죽어\s*버려|(섹스|성관계|야동))/;
-// 연애감정·집착·죄책감 유도, 운전 훈계·평가(말투 규칙 3·4)
-const OUT_STYLE = /(보고\s*싶었|왜\s*이제\s*왔|나\s*외로웠|나\s*없이\s*못|너\s*없이\s*못|사랑해|운전\s*(못하|잘못)|속도\s*(좀\s*)?줄여|안전\s*운전\s*(하|해))/;
+// 연애감정·집착·죄책감 유도, 운전 평가(말투 규칙 3·4)
+const OUT_STYLE = /(보고\s*싶었|왜\s*이제\s*왔|나\s*외로웠|나\s*없이\s*못|너\s*없이\s*못|사랑해|운전\s*(못하|잘못)|속도\s*(좀\s*)?줄여)/;
+// 운전 훈계(천천히 가자, 안전운전 해, 조심해서 가). 운전자가 직접 물었거나 같은 말을 꺼냈을 때만 허용한다.
+const OUT_LECTURE = /(천천히\s*(가|갈|다니|다녀|운전|달려|몰)|안전\s*운전\s*(하|해|꼭|을)|안전하게\s*(가|운전|달려|다녀|몰)|조심(해서|히)\s*(가|운전|다녀|몰|달려)|운전\s*조심|앞(을|에)?\s*잘\s*(봐|보고|보며))/;
+const LECTURE_ASKED = /(천천히|안전|조심|서행|속도|팁|요령|조언|평가|잔소리)/;
+// 앱이 못 하는 일(검색, 길 찾기·안내, 내비 조작)을 해 주겠다는 제안
+const OUT_CANT = /((주유소|충전소|식당|맛집|카페|휴게소)(를|을|도)?\s*찾아\s*(들러|가|보|줄|드)|찾아\s*(볼까|볼게|줄까|줄게|드릴까요|드릴게요)|검색(해|할까)\s*(줄까|줄게|볼까|볼게|드릴까요|드릴게요)|검색해\s*(줄|드)|길\s*안내(해|할까)|안내(해|할까)\s*(줄까|줄게|드릴까요|드릴게요)|안내해\s*(줄|드)|내비.{0,8}(켜|설정|띄워|맞춰)\s*(줄까|줄게|드릴까요|드릴게요))/;
 // 주행 중 화면 조작·확인 요구
 const OUT_SCREEN = /((화면|버튼|아이콘).{0,8}(눌러|터치|클릭|확인해|봐\s*봐|보세요|보세)|(휴대폰|폰).{0,6}(봐|확인|보세))/;
 
-export function checkOutput(piece: string, driving: boolean): OutputVerdict {
+/** userText 는 이번 운전자 말(훈계성 말을 운전자가 먼저 꺼낸 경우를 가려내는 데만 쓴다). */
+export function checkOutput(piece: string, driving: boolean, userText = ""): OutputVerdict {
   if (OUT_UNSAFE.test(piece)) return "unsafe";
   if (OUT_STYLE.test(piece)) return "drop";
+  if (OUT_LECTURE.test(piece) && !LECTURE_ASKED.test(userText)) return "drop";
+  if (OUT_CANT.test(piece)) return "cant";
   if (driving && OUT_SCREEN.test(piece)) return "drop";
   return "ok";
 }
