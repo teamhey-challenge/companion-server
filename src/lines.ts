@@ -91,3 +91,14 @@ export function fixedPieces(): string[] {
   }
   return [...out];
 }
+
+/** 서버가 뜰 때 미리 합성하는 가장 자주 쓰는 조각(최대 10개): 채움말, 첫 인사, 첫 만남 첫 질문, 못 알아들음, 음주 거절, 화제 전환. 나머지는 처음 말할 때 캐시에 담긴다. */
+export const PRIME_LIMIT = 10;
+export function primePieces(): string[] {
+  const out = new Set<string>();
+  for (const line of [L.thinking, L.greetDefault, L.askSpeech, L.notHeard, L.safetyDrunk, L.safetyTopic]) {
+    const sp = new SentenceSplitter(FIRST_PIECE_OPTS);
+    for (const piece of [...sp.push(line.banmal), ...sp.flush()]) out.add(piece);
+  }
+  return [...out].slice(0, PRIME_LIMIT);
+}
