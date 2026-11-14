@@ -516,6 +516,24 @@ describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
     car.close();
   });
 
+  test("consent arriving long after the baseline P ctx (fake clock +90 s, then +10 min) still gets the first-meeting question", async () => {
+    const real = new SystemClock();
+    let offset = 0;
+    const shifted: Clock = { now: () => real.now() + offset, setTimeout: (f, ms) => real.setTimeout(f, ms), clearTimeout: (h) => real.clearTimeout(h) };
+    for (const jump of [90_000, 600_000]) {
+      const car = await Car.connect(boot(newLlm(), false, shifted), `install-late${jump}`);
+      car.ctx({ gear: "P", speedKmh: 0 }); // baseline P, consent still missing
+      await Bun.sleep(80); // negative check: nothing before consent
+      expect(proactives(car)).toEqual([]);
+      offset += jump; // the driver spends a long time on C1
+      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 300 }); // an ordinary ctx update while C1 is open
+      await car.consent("record");
+      await car.consent("external_ai");
+      await car.until((f) => f.some((x) => x.type === "proactive" && x.reason === "meet"), 4000);
+      car.close();
+    }
+  });
+
   test("consent first, then the baseline ctx: the first-meeting question still comes (order-independent)", async () => {
     const car = await Car.connect(boot(newLlm()));
     await car.grantTalk();
