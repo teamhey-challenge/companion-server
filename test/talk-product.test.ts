@@ -22,15 +22,16 @@ interface Frame { type: string; turnId?: string; id?: string; reason?: string; t
 const sse = (text: string) =>
   `${[...text].map((ch) => `data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`).join("")}data: [DONE]\n\n`;
 
-interface Llm { replies: string[]; extraction: string; calls: { system: string; user: string }[]; extractCalls: number }
+interface Llm { replies: string[]; extraction: string; calls: { system: string; user: string }[]; extractCalls: number; /** 도착·첫 인사 프롬프트에 대한 답(없으면 NONE). delayMs 만큼 늦게 첫 글자를 보낸다. */ proactive?: (system: string) => string; proactiveDelayMs?: number }
 
-function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string } = {}) {
+function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string; proactiveLlmFirstMs?: number } = {}) {
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     arrivalDelayMs: 30,
     clock,
     llmDeadlineMs: extra.llmDeadlineMs,
+    proactiveLlmFirstMs: extra.proactiveLlmFirstMs,
     tts: tts ? new FakeTts() : null,
     fetchImpl: (async (_u: string, init: RequestInit) => {
       if (extra.stallAfter) {
@@ -63,7 +64,9 @@ function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: num
         return new Response(sse(llm.extraction), { headers: { "content-type": "text/event-stream" } });
       }
       llm.calls.push({ system, user });
-      const text = system.includes("먼저 말 걸기: arrival") || system.includes("먼저 말 걸기: greeting") ? "NONE" : (llm.replies.shift() ?? "그렇구나, 좋아!");
+      const isProactive = system.includes("먼저 말 걸기: arrival") || system.includes("먼저 말 걸기: greeting");
+      if (isProactive && llm.proactiveDelayMs) await Bun.sleep(llm.proactiveDelayMs);
+      const text = isProactive ? (llm.proactive?.(system) ?? "NONE") : (llm.replies.shift() ?? "그렇구나, 좋아!");
       return new Response(sse(text), { headers: { "content-type": "text/event-stream" } });
     }) as unknown as typeof fetch,
   });
@@ -378,6 +381,122 @@ describe("proactive decision", () => {
     expect(proactives(next).map((p) => p.reason)).toEqual(["greeting"]);
     expect(next.frames.find((f) => f.type === "reply.end")?.text).toBe("안녕! 오늘은 어디 가?");
     next.close();
+  });
+
+  describe("H1: memory-based arrival and first-boarding lines (PLEOS-167)", () => {
+    const ARRIVE = "도착했네! 오늘 면접 잘 보고 와, 끝나고 어땠는지 알려 줘!";
+    const ASK = "어제 면접 어땠어?";
+    const park = { gear: "P", speedKmh: 0 };
+
+    /** 첫 만남을 끝내고 말한 사실 하나를 기억으로 남긴 차 + 움직이는 시계. */
+    async function carWithFact(llm: Llm, extra: { proactiveLlmFirstMs?: number } = {}) {
+      const real = new SystemClock();
+      const t = { offset: 0 };
+      const shifted: Clock = { now: () => real.now() + t.offset, setTimeout: (f, ms) => real.setTimeout(f, ms), clearTimeout: (h) => real.clearTimeout(h) };
+      const b = boot(llm, false, shifted, extra);
+      const car = await Car.connect(b);
+      await car.grantTalk();
+      await car.consent("memory");
+      car.ctx(park);
+      await car.until((f) => f.some((x) => x.type === "reply.end"));
+      await car.say("편하게 해", "h1");
+      await car.say("됐어", "h2");
+      await car.say("적당히", "h3");
+      llm.extraction = "FACT: 오늘 면접 보러 간다";
+      await car.say("나 오늘 면접 보러 가", "h4");
+      for (let i = 0; i < 200 && (await car.memory()).length === 0; i++) await Bun.sleep(20); // the extraction is a background call; poll the real store
+      expect((await car.memory()).map((m) => m.text)).toEqual(["오늘 면접 보러 간다"]);
+      car.close();
+      return { b, t };
+    }
+    const arrive = async (b: { base: string; port: number | undefined }) => {
+      const car = await Car.connect(b);
+      car.ctx({ gear: "D", speedKmh: 30 });
+      car.ctx(park);
+      await car.until((f) => f.some((x) => x.type === "reply.end"));
+      return car;
+    };
+
+    test("arrival: a memory said today makes the model's line (with 오늘 말함 in the prompt), spoken once and cap-limited", async () => {
+      const llm = newLlm();
+      llm.proactive = () => `${ARRIVE} 힘내! 화이팅! 잘 될 거야!`;
+      const { b } = await carWithFact(llm);
+      const car = await arrive(b);
+      expect(proactives(car).map((p) => p.reason)).toEqual(["arrival"]);
+      const said = car.frames.find((f) => f.type === "reply.end")!.text!;
+      expect(said.startsWith(ARRIVE)).toBe(true);
+      expect(said.split(/[.!?]/).filter((s) => s.trim()).length).toBeLessThanOrEqual(4); // parked cap
+      expect(llm.calls.at(-1)!.system).toContain("오늘 말함: 오늘 면접 보러 간다");
+      car.close();
+    });
+
+    test("next boarding the day after: first P asks about yesterday's item (어제 말함 in the prompt)", async () => {
+      const llm = newLlm();
+      llm.proactive = (s) => (s.includes("먼저 말 걸기: greeting") && s.includes("어제 말함: 오늘 면접 보러 간다") ? ASK : "NONE");
+      const { b, t } = await carWithFact(llm);
+      t.offset = 24 * 3_600_000 + 60_000; // same KST time of day, next day: always exactly "어제"
+      const next = await Car.connect(b);
+      next.ctx(park);
+      await next.until((f) => f.some((x) => x.type === "reply.end"));
+      expect(proactives(next).map((p) => p.reason)).toEqual(["greeting"]);
+      expect(next.frames.find((f) => f.type === "reply.end")?.text).toBe(ASK);
+      next.close();
+    });
+
+    test("NONE from the model -> the fixed lines (arrival today, greeting next day)", async () => {
+      const llm = newLlm(); // proactive undefined -> NONE
+      const { b, t } = await carWithFact(llm);
+      const car = await arrive(b);
+      expect(car.frames.find((f) => f.type === "reply.end")?.text).toContain("도착");
+      expect(car.frames.find((f) => f.type === "reply.end")?.text).not.toContain("면접");
+      car.close();
+      t.offset = 26 * 3_600_000;
+      const next = await Car.connect(b);
+      next.ctx(park);
+      await next.until((f) => f.some((x) => x.type === "reply.end"));
+      expect(next.frames.find((f) => f.type === "reply.end")?.text).toBe("안녕! 오늘은 어디 가?");
+      next.close();
+    });
+
+    test("a slow model (no first character in time) -> the fixed line, not silence", async () => {
+      const llm = newLlm();
+      llm.proactive = () => ARRIVE;
+      llm.proactiveDelayMs = 600; // the fake provider really is slow here; fake timers cannot delay a fetch
+      const { b } = await carWithFact(llm, { proactiveLlmFirstMs: 100 });
+      const car = await arrive(b);
+      const text = car.frames.find((f) => f.type === "reply.end")!.text!;
+      expect(text).toContain("도착");
+      expect(text).not.toContain("면접");
+      car.close();
+    });
+
+    test("a memory older than 3 days is not offered to the model: fixed line, no proactive LLM call", async () => {
+      const llm = newLlm();
+      llm.proactive = () => ARRIVE;
+      const { b, t } = await carWithFact(llm);
+      t.offset = 5 * 86_400_000;
+      const before = llm.calls.length;
+      const next = await Car.connect(b);
+      next.ctx(park);
+      await next.until((f) => f.some((x) => x.type === "reply.end"));
+      expect(next.frames.find((f) => f.type === "reply.end")?.text).toBe("안녕! 오늘은 어디 가?");
+      expect(llm.calls.length).toBe(before);
+      next.close();
+    });
+
+    test("D-14: navi guiding -> no arrival line at all, memory or not", async () => {
+      const llm = newLlm();
+      llm.proactive = () => ARRIVE;
+      const { b } = await carWithFact(llm);
+      const before = llm.calls.length;
+      const car = await Car.connect(b);
+      car.ctx({ gear: "D", speedKmh: 30, naviGuiding: true });
+      car.ctx({ gear: "P", speedKmh: 0, naviGuiding: true });
+      await Bun.sleep(300); // real wait: asserting that nothing happens past the 30 ms arrival delay
+      expect(proactives(car)).toEqual([]);
+      expect(llm.calls.length).toBe(before);
+      car.close();
+    });
   });
 
   test("voice speech change pushes a settings frame (phone/car sync)", async () => {

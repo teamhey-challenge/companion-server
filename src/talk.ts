@@ -12,6 +12,7 @@ import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
+import { recentForProactive } from "./memory-lines";
 import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap, splitSentences } from "./sentence-cap";
 import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
 
@@ -142,6 +143,8 @@ export interface TalkGuard {
   fillerAfterMs?: number;
   /** 한 턴이 LLM 에 쓸 수 있는 전체 시간(기본 20초). 시험에서만 바꾼다. */
   llmDeadlineMs?: number;
+  /** 기억 담은 먼저 말이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
+  proactiveLlmFirstMs?: number;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -167,22 +170,48 @@ interface Plan {
   userText: string;
 }
 
-/** 모델 출력이 NONE 이면 fallback 으로 바꾼다. 앞 몇 글자를 먼저 모아 판단하므로 NONE 은 소리로 나가지 않는다. */
-async function* noneGuard(src: AsyncIterable<string>, fallback: string): AsyncGenerator<string> {
+/** 먼저 말 걸기 LLM 이 이 시간 안에 첫 글자를 못 내면 고정 문장으로 대신한다(차가 한참 말이 없는 것보다 낫다). */
+const PROACTIVE_LLM_FIRST_MS = 3500;
+
+/**
+ * 모델 출력이 NONE 이면 fallback 으로 바꾼다. 앞 몇 글자를 먼저 모아 판단하므로 NONE 은 소리로 나가지 않는다.
+ * 첫 글자가 firstMs 안에 안 오면 onSlow() 로 모델을 끊고 fallback 을 낸다.
+ */
+async function* noneGuard(src: AsyncIterable<string>, fallback: string, firstMs: number, onSlow: () => void): AsyncGenerator<string> {
+  const it = src[Symbol.asyncIterator]();
   let head = "";
   let decided = false;
-  for await (const d of src) {
-    if (decided) {
-      yield d;
-      continue;
+  const { promise: slow, resolve: wake } = Promise.withResolvers<"slow">();
+  const firstTimer = setTimeout(() => wake("slow"), firstMs);
+  try {
+    while (true) {
+      const r = decided ? await it.next() : await Promise.race([it.next(), slow]);
+      if (r === "slow") {
+        onSlow();
+        void it.return?.(undefined)?.catch?.(() => undefined);
+        yield fallback;
+        return;
+      }
+      if (r.done) break;
+      if (decided) {
+        yield r.value;
+        continue;
+      }
+      head += r.value;
+      if (head.trim().length < 4) continue;
+      decided = true;
+      clearTimeout(firstTimer);
+      if (/^NONE/i.test(head.trim())) return void (yield fallback);
+      yield head;
     }
-    head += d;
-    if (head.trim().length < 4) continue;
-    decided = true;
-    if (/^NONE/i.test(head.trim())) return void (yield fallback);
-    yield head;
+    if (!decided) yield /^NONE/i.test(head.trim()) || !head.trim() ? fallback : head;
+  } catch (e) {
+    // 먼저 말 걸기는 모델이 실패해도 고정 문장으로 말한다(아직 아무것도 말하지 않았을 때만).
+    if (decided) throw e;
+    yield fallback;
+  } finally {
+    clearTimeout(firstTimer);
   }
-  if (!decided) yield /^NONE/i.test(head.trim()) || !head.trim() ? fallback : head;
 }
 
 /** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 1003으로 닫는다. */
@@ -194,6 +223,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   const arrivalDelay = opts?.arrivalDelayMs ?? ARRIVAL_DELAY_MS;
   const fillerAfter = opts?.fillerAfterMs ?? FILLER_AFTER_MS;
   const llmDeadline = opts?.llmDeadlineMs ?? LLM_DEADLINE_MS;
+  const proactiveFirstMs = opts?.proactiveLlmFirstMs ?? PROACTIVE_LLM_FIRST_MS;
   const fetchImpl = opts?.fetchImpl ?? fetch;
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
@@ -352,7 +382,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       let src: AsyncIterable<string>;
       if (plan.llm) {
         let s: AsyncIterable<string> = llmText(plan.llm.system, plan.llm.userText, plan.llm.maxTokens, llmAbort.signal, meta);
-        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback);
+        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback, proactiveFirstMs, () => llmAbort.abort());
         src = s;
       } else {
         src = (async function* () {
@@ -553,11 +583,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     c.firstStopRetry = undefined;
   };
 
-  /** 프롬프트에 기억을 담은 먼저 말 계획(모델이 NONE 이라 하면 fallback 문장). */
+  /** 기억을 담은 먼저 말 계획. 최근(3일 이내) 기억만 쓰고, 없으면 바로 고정 문장. 모델이 NONE·실패·느리면 fallback 문장. */
   function memoryPlan(ws: Ws, s: Settings, ctx: Ctx, reason: string, instruction: string, fallback: string): Plan {
     const d = ws.data;
     const c = conn(d);
-    const memories = store.memoryAllowed(d.installId) && c.pro.memoryRecalls < MAX_MEMORY_RECALLS ? store.listMemory(d.installId, 12) : [];
+    const memories = store.memoryAllowed(d.installId) && c.pro.memoryRecalls < MAX_MEMORY_RECALLS ? recentForProactive(store.listMemory(d.installId, 12), clock.now()) : [];
     if (!memories.length) return fixed(fallback, s.speech, "", false);
     c.pro.memoryRecalls++;
     c.lastMemoryId = memories[0]?.id;
@@ -570,14 +600,14 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const ev = c.pro.dayEvents;
     const fallback = withName(pick(ev.has("rain") ? L.arriveRain : ev.has("dark") ? L.arriveDark : L.arriveDefault, s.speech), s.nickname, s.speech);
     const instruction =
-      '방금 목적지에 도착해 주차(P)했다. [기억] 중에 오늘 이어서 챙길 만한 것(면접, 약속, 걱정 등)이 있으면 그것에 대한 도착 마무리 인사를 한 문장으로 한다(예: "도착했네! 면접 꼭 잘 보고 와, 끝나고 어땠는지 알려 줘!"). 챙길 만한 게 없으면 정확히 NONE 한 단어만 쓴다.';
+      '방금 목적지에 도착해 주차(P)했다. [기억] 맨 위 항목이 "오늘 말함"이고 면접·발표·약속·시험·병원처럼 오늘 이어서 챙길 일이면, 그 일을 잘 하고 오라는 도착 인사를 한 문장으로 한다(예: "도착했네! 오늘 면접 잘 보고 와, 끝나고 어땠는지 알려 줘!"). 어제 이전 것이거나 챙길 만한 게 없으면 정확히 NONE 한 단어만 쓴다. 기억에 없는 장소·시간은 말하지 않는다.';
     return memoryPlan(ws, s, ctx, "arrival", instruction, fallback);
   }
 
   function greetingPlan(ws: Ws, s: Settings, ctx: Ctx): Plan {
     const fallback = withName(pick(L.greetDefault, s.speech), s.nickname, s.speech);
     const instruction =
-      '오늘 처음 탔다. [기억] 중에 이어서 물어볼 만한 것이 있으면 그것으로 첫 인사를 한 문장으로 한다(예: "저번에 면접 본다고 했잖아, 어떻게 됐어?"). 없으면 정확히 NONE 한 단어만 쓴다.';
+      '오늘 처음 탔다. [기억] 중 "어제 말함"(또는 며칠 전)이면서 결과를 물어볼 만한 일(면접, 발표, 약속, 시험, 병원 등)이 있으면 그 결과를 묻는 첫 인사를 한 문장으로 한다(예: "어제 면접 어땠어?"). 오늘 말한 것이거나 물을 만한 게 없으면 정확히 NONE 한 단어만 쓴다. 기억에 없는 내용은 지어내지 않는다.';
     return memoryPlan(ws, s, ctx, "greeting", instruction, fallback);
   }
 
