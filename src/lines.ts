@@ -47,6 +47,11 @@ export const L = {
   rangeEv: pair("남은 거리가 좀 빠듯해. 출발 전에 충전 들를래?", "남은 거리가 좀 빠듯해요. 출발 전에 충전 들르실래요?"),
   rangeIce: pair("남은 거리가 좀 빠듯해. 출발 전에 주유 들를래?", "남은 거리가 좀 빠듯해요. 출발 전에 주유 들르실래요?"),
   rangeLpg: pair("남은 거리가 좀 빠듯해. 출발 전에 충전소 들를래?", "남은 거리가 좀 빠듯해요. 출발 전에 충전소 들르실래요?"),
+  // 시나리오 2: "이따가 할래"에 대한 확인, 그리고 다음 정차 때 한 번 더 챙기는 말(목적지 비교 문장은 rangeDestLine)
+  postponeAck: pair("알았어, 다음에 멈출 때 한 번 더 챙겨 줄게!", "알겠어요, 다음에 멈추실 때 한 번 더 챙겨 드릴게요!"),
+  remindEv: pair("아까 충전 들르기로 한 거 기억해?", "아까 충전 들르기로 하신 거 기억하세요?"),
+  remindIce: pair("아까 주유 들르기로 한 거 기억해?", "아까 주유 들르기로 하신 거 기억하세요?"),
+  remindLpg: pair("아까 충전소 들르기로 한 거 기억해?", "아까 충전소 들르기로 하신 거 기억하세요?"),
   // 어투·호칭 바꾸기(F11)
   speechBanmal: pair("알았어, 편하게 말할게!", "알았어, 편하게 말할게!"),
   speechJondaetmal: pair("네, 존댓말로 말씀드릴게요.", "네, 존댓말로 말씀드릴게요."),
@@ -77,6 +82,14 @@ export const forgetDone = (snippet: string, s: SpeechStyle): string =>
 
 export const nicknameSet = (nickname: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `네, 앞으로 ${nickname}님이라고 부를게요.` : `알았어, 앞으로 ${nickname}${hasBatchim(nickname[nickname.length - 1]!) ? "이라고" : "라고"} 부를게!`;
+
+/** 시나리오 2: 내비 목적지가 있을 때(destKm·rangeKm 는 정수 km), 유종별로 가는 길에 들를 곳을 묻는다. 질문으로 끝나서 차가 답을 듣는다. */
+export const rangeDestLine = (kind: "ev" | "lpg" | "ice", dest: number, range: number, s: SpeechStyle): string => {
+  const stop = kind === "ev" ? "충전" : kind === "lpg" ? "충전소" : "주유";
+  return s === "jondaetmal"
+    ? `목적지까지 ${dest}km인데 남은 거리가 ${range}km예요. 가는 길에 ${stop} 들르실래요?`
+    : `목적지까지 ${dest}km인데 남은 거리가 ${range}km야. 가는 길에 ${stop} 들를래?`;
+};
 
 /**
  * 서버가 시작할 때 미리 합성해 메모리에 둘 고정 조각들. 말하기 때와 똑같은 규칙으로 조각내야 캐시에 맞는다.

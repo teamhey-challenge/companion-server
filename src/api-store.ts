@@ -16,9 +16,10 @@ import {
 } from "../shared/packages/protocol/src/index";
 import type { Clock } from "./clock";
 
-/** meetStage 0 처음 ~ 4 끝. lastGreetingDay는 차 시계 기준 날짜 문자열. */
-export interface TalkState { meetStage: number; lastGreetingDay: string | null }
-export const DEFAULT_TALK_STATE: TalkState = { meetStage: 0, lastGreetingDay: null };
+/** meetStage 0 처음 ~ 4 끝. lastGreetingDay는 차 시계 기준 날짜 문자열. pendingStop: "이따가 할래"로 미룬 들를 곳(유종 갈래), 다음 정차 때 한 번 챙기고 비운다. */
+export type StopKind = "ev" | "lpg" | "ice";
+export interface TalkState { meetStage: number; lastGreetingDay: string | null; pendingStop: StopKind | null }
+export const DEFAULT_TALK_STATE: TalkState = { meetStage: 0, lastGreetingDay: null, pendingStop: null };
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 export const CHARACTER_NAME = "헤이파리";
