@@ -23,14 +23,26 @@ const sse = (text: string) =>
 
 interface Llm { replies: string[]; extraction: string; calls: { system: string; user: string }[]; extractCalls: number }
 
-function boot(llm: Llm, tts = false, clock?: Clock) {
+function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean } = {}) {
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     arrivalDelayMs: 30,
     clock,
+    llmDeadlineMs: extra.llmDeadlineMs,
     tts: tts ? new FakeTts() : null,
     fetchImpl: (async (_u: string, init: RequestInit) => {
+      if (extra.stall) {
+        // 첫 글자만 보내고 멈추는 공급사: 끊기(abort) 전에는 스트림이 끝나지 않는다.
+        const enc = new TextEncoder();
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "음" } }] })}\n\n`));
+            init.signal?.addEventListener("abort", () => c.error(new Error("aborted")), { once: true });
+          },
+        });
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      }
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
       const system = body.messages[0]!.content;
       const user = body.messages[1]!.content;
@@ -106,6 +118,20 @@ async function readyCar(llm: Llm, tts = false) {
 }
 const proactives = (car: Car) => car.frames.filter((f) => f.type === "proactive");
 const drive = { gear: "D", speedKmh: 40, naviGuiding: false };
+
+describe("LLM deadline (PLEOS-134)", () => {
+  test("a stream that stalls after the first token ends the turn with error llm_failed and the next turn is accepted", async () => {
+    const car = await Car.connect(boot(newLlm(), false, undefined, { llmDeadlineMs: 150, stall: true }));
+    await car.consent("record");
+    await car.consent("memory");
+    await car.say("오늘 날씨 어때?", "d1");
+    expect(car.frames.find((f) => f.turnId === "d1" && f.type === "error")?.code).toBe("llm_failed");
+    expect(car.frames.some((f) => f.turnId === "d1" && f.type === "reply.end")).toBe(false);
+    await car.say("다시 물어볼게", "d2");
+    expect(car.frames.find((f) => f.turnId === "d2" && f.type === "error")?.code).toBe("llm_failed");
+    car.close();
+  });
+});
 
 describe("proactive decision", () => {
   test("wiper turning on while driving: proactive frame, then reply on the same id (AC-4.3-05)", async () => {
