@@ -12,6 +12,7 @@ import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
+import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap } from "./sentence-cap";
 import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -293,13 +294,19 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       else held.push(text);
       pipeline?.add(piece);
     };
+    /** 문장 수 상한(주행 중 2, 정차 중 4): LLM 답에만 건다. 상한째 문장이 끝나면 capped=true 로 스트림을 끊고 말한 만큼만 남긴다. */
+    const cap = plan.llm ? new SentenceCap(plan.driving ? DRIVING_MAX_SENTENCES : PARKED_MAX_SENTENCES) : null;
+    let capped = false;
     /** 조각마다 출력 필터. unsafe 면 true(나머지 출력을 버리고 화제 전환 문장으로 끝낸다). */
     const feed = (pieces: string[]): boolean => {
       for (const p of pieces) {
+        if (capped) break;
         const v = checkOutput(p, plan.driving);
         if (v === "drop") continue;
         if (v === "unsafe") return true;
-        say(p);
+        const r = cap ? cap.take(p) : { text: p, done: false };
+        if (r.text) say(r.text);
+        if (r.done) capped = true;
       }
       return false;
     };
@@ -343,6 +350,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         first ??= Math.round(performance.now() - t0);
         if (feed(splitter.push(d))) {
           unsafe = true;
+          llmAbort.abort();
+          break;
+        }
+        if (capped) {
+          observer.event("talk.capped", { driving: Number(plan.driving) });
           llmAbort.abort();
           break;
         }
