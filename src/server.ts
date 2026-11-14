@@ -29,6 +29,7 @@ export interface ServerOptions {
   publicPerMin?: number;
   /** 도착 인사까지의 시간(F10, 기본 3초). 시험에서만 바꾼다. */
   arrivalDelayMs?: number;
+  fillerAfterMs?: number;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -125,7 +126,7 @@ export function createServer(o: ServerOptions): RunningServer {
       if (srv.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     },
-    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs }), maxPayloadLength: 4 * 1024 },
+    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs }), maxPayloadLength: 4 * 1024 },
   });
   const stop = server.stop.bind(server);
   server.stop = (force?: boolean) => {

@@ -1,3 +1,4 @@
+import { FIRST_PIECE_OPTS, SentenceSplitter } from "./tts";
 import type { SpeechStyle } from "../shared/packages/protocol/src/index";
 
 /**
@@ -56,6 +57,8 @@ export const L = {
   forgetEmpty: pair("지울 기억이 아직 없어.", "지울 기억이 아직 없어요."),
   // 못 알아들음(PB-4)
   notHeard: pair("잘 못 들었어, 한 번만 다시 말해 줄래?", "잘 못 들었어요, 한 번만 다시 말씀해 주실래요?"),
+  // 첫 토큰이 늦을 때 먼저 들려주는 채움말(개발 초안, 기획 B 확정 전). 서버 시작 때 미리 합성해 메모리에 둔다.
+  thinking: pair("음… 잠깐만!", "음… 잠시만요!"),
   // 안전 필터(PB-4 금지 주제 표, 거절 1문장)
   safetyDrunk: pair("그건 같이 못 해. 마신 날은 대리 부르고 편하게 가자!", "그건 같이 못 해요. 마신 날은 대리 부르고 편하게 가요!"),
   safetyDrowsy: pair("그건 같이 못 해. 졸리거나 피곤하면 잠깐 쉬어 가자!", "그건 같이 못 해요. 졸리거나 피곤하시면 잠깐 쉬어 가요!"),
@@ -73,3 +76,18 @@ export const forgetDone = (snippet: string, s: SpeechStyle): string =>
 
 export const nicknameSet = (nickname: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `네, 앞으로 ${nickname}님이라고 부를게요.` : `알았어, 앞으로 ${nickname}${hasBatchim(nickname[nickname.length - 1]!) ? "이라고" : "라고"} 부를게!`;
+
+/**
+ * 서버가 시작할 때 미리 합성해 메모리에 둘 고정 조각들. 말하기 때와 똑같은 규칙으로 조각내야 캐시에 맞는다.
+ * 호칭이 붙는 문장(withName)은 이름마다 달라서 제외한다.
+ */
+export function fixedPieces(): string[] {
+  const out = new Set<string>();
+  for (const p of Object.values(L)) {
+    for (const text of new Set([p.banmal, p.jondaetmal])) {
+      const sp = new SentenceSplitter(FIRST_PIECE_OPTS);
+      for (const piece of [...sp.push(text), ...sp.flush()]) out.add(piece);
+    }
+  }
+  return [...out];
+}

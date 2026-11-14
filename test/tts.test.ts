@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type RunningServer } from "../src/server";
 import { Observability } from "../src/observe";
-import { AudioPipeline, BreezeTts, FakeTts, Semaphore, SentenceSplitter, loadTtsConfig, TtsError, type TtsProvider } from "../src/tts";
+import { L, pick } from "../src/lines";
+import { AudioPipeline, BreezeTts, FakeTts, GatedTts, PhraseCache, Semaphore, SentenceSplitter, loadTtsConfig, TtsError, type TtsProvider } from "../src/tts";
 
 describe("SentenceSplitter", () => {
   test("splits at sentence ends and keeps the tail for flush", () => {
@@ -21,12 +22,13 @@ describe("SentenceSplitter", () => {
 });
 
 describe("AudioPipeline", () => {
-  const run = async (tts: TtsProvider, sentences: string[], sem = new Semaphore(2)) => {
+  const run = async (tts: TtsProvider, sentences: string[], limit = 2) => {
     const ac = new AbortController();
     const events: string[] = [];
-    const p = new AudioPipeline(tts, sem, ac.signal, {
+    const gated = new GatedTts(tts, new Semaphore(limit), new Observability(() => {}));
+    const p = new AudioPipeline(gated, ac.signal, {
       onStart: (ok) => events.push(ok ? "start" : "none"),
-      onChunk: (c) => events.push(`chunk${c[0]}`),
+      onChunk: (c, filler) => events.push(`${filler ? "f" : "chunk"}${c[0]}`),
       onError: () => events.push("error"),
     });
     for (const s of sentences) p.add(s);
@@ -45,6 +47,41 @@ describe("AudioPipeline", () => {
     await run(fake, ["문장 하나입니다.", "문장 둘입니다.", "문장 셋입니다.", "문장 넷입니다."]);
     expect(fake.calls.length).toBe(4);
     expect(fake.maxActive).toBe(2);
+  });
+  test("gate keeps generations at 2 and logs queue wait", async () => {
+    const lines: string[] = [];
+    const fake = new FakeTts(5);
+    const gated = new GatedTts(fake, new Semaphore(2), new Observability((l) => lines.push(l)));
+    const ac = new AbortController();
+    await Promise.all(["하나입니다.", "둘입니다요.", "셋입니다요.", "넷입니다요."].map(async (s) => { for await (const _ of await gated.synth(s, ac.signal)) void _; }));
+    expect(fake.maxActive).toBe(2);
+    expect(lines.some((l) => l.includes('"tts.queue_wait"'))).toBe(true);
+  });
+  test("phrase cache: primed phrase is served from memory without a provider call or gate slot, LRU bounded", async () => {
+    const fake = new FakeTts();
+    const cache = new PhraseCache(new GatedTts(fake, new Semaphore(1), new Observability(() => {})), "v1", 3 * 480 * 2);
+    expect(await cache.prime(["음… 잠깐만!"])).toMatchObject({ done: 1, failed: 0, entries: 1, bytes: 1440 });
+    expect(cache.cached("음… 잠깐만!")).toBe(true);
+    const got: number[] = [];
+    for await (const c of await cache.synth("음… 잠깐만!", new AbortController().signal)) got.push(c[0]!);
+    expect(got).toEqual([1, 2, 3]);
+    expect(fake.calls).toEqual(["음… 잠깐만!"]);
+    // 프라임 목록에 없는 문장은 담지 않는다
+    for await (const _ of await cache.synth("LLM 이 만든 문장", new AbortController().signal)) void _;
+    expect(cache.cached("LLM 이 만든 문장")).toBe(false);
+    // 한도(2문장분)를 넘으면 가장 오래 안 쓴 것부터 버린다
+    await cache.prime(["둘째 문장입니다.", "셋째 문장입니다."]);
+    expect(cache.size.entries).toBe(2);
+    expect(cache.cached("음… 잠깐만!")).toBe(false);
+  });
+  test("prime stops after two failures in a row", async () => {
+    const bad: TtsProvider = {
+      async synth() {
+        throw new TtsError(402, "x");
+      },
+    };
+    const cache = new PhraseCache(bad, "v1");
+    expect(await cache.prime(["하나입니다.", "둘입니다요.", "셋입니다요."])).toMatchObject({ done: 0, failed: 2 });
   });
   test("first sentence failing -> none, later sentences are not requested", async () => {
     const calls: string[] = [];
@@ -214,5 +251,60 @@ describe("server with TTS", () => {
     const slow = new FakeTts(60);
     const { bytes } = await turn(slow, two, true);
     expect(bytes.length).toBeLessThan(9);
+  });
+
+  test("slow first token: a primed filler is played once, flagged separately from the real first byte", async () => {
+    const fake = new FakeTts();
+    const cache = new PhraseCache(new GatedTts(fake, new Semaphore(2), new Observability(() => {})), "v1");
+    await cache.prime([pick(L.thinking, "banmal")]);
+    const lines: string[] = [];
+    const slowBody = new ReadableStream<Uint8Array>({
+      async start(c) {
+        await Bun.sleep(150); // 첫 토큰 지연을 흉내 내는 시험용 지연(채움말 임계 30ms 보다 길게)
+        c.enqueue(new TextEncoder().encode(deltas(["안녕하세요! 반가워요."])));
+        c.close();
+      },
+    });
+    const fetchImpl = (async () => new Response(slowBody, { headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const s = createServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      talk: { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 10 },
+      guard: { provisionSecret: "p", trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
+      observer: new Observability((l) => lines.push(l)),
+      dbPath: ":memory:",
+      tts: cache,
+      fetchImpl,
+      fillerAfterMs: 30,
+    });
+    servers.push(s);
+    const base = `http://127.0.0.1:${s.port}`;
+    const j = { "content-type": "application/json" };
+    const reg: { carToken: string } = await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j, "X-Provision-Secret": "p" }, body: JSON.stringify({ installId: "install-0002" }) })).json();
+    const ses: { wsTicket: string } = await (await fetch(`${base}/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${reg.carToken}` } })).json();
+    const ws = new WebSocket(`ws://127.0.0.1:${s.port}/v1/talk?ticket=${ses.wsTicket}`);
+    ws.binaryType = "arraybuffer";
+    const { promise, resolve } = Promise.withResolvers<void>();
+    let bins = 0;
+    ws.onmessage = (e) => {
+      if (typeof e.data !== "string") bins++;
+      else if (e.data.includes('"reply.end"')) resolve();
+    };
+    ws.onopen = () => {
+      for (const f of [
+        { type: "hello", v: 1, appVersion: "t" },
+        { type: "turn.start", turnId: "t1", trigger: "ptt" },
+        { type: "text", turnId: "t1", text: "안녕" },
+        { type: "turn.end", turnId: "t1" },
+      ]) ws.send(JSON.stringify(f));
+    };
+    await promise;
+    ws.close();
+    const timing: Record<string, number> = JSON.parse(lines.find((l) => l.includes('"talk.timing"'))!);
+    expect(bins).toBe(9); // 채움말 3조각 + 답 두 문장 6조각
+    expect(timing.filler_ms).toBeGreaterThan(0);
+    expect(timing.first_audio_ms).toBe(timing.filler_ms);
+    expect(timing.first_tts_byte_ms).toBeGreaterThan(timing.filler_ms!);
+    expect(fake.calls.filter((c) => c === pick(L.thinking, "banmal")).length).toBe(1);
   });
 });

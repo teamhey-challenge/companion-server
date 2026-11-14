@@ -33,6 +33,8 @@ export interface TtsProvider {
   synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>>;
   /** 곧 synth 가 불릴 것을 알리는 신호. 연결(TCP+TLS)을 미리 열어 둔다. 실패해도 조용히 넘어간다. */
   warm?(): void;
+  /** 이 문장의 오디오가 메모리에 있어 공급사를 거치지 않고 바로 나가는가. */
+  cached?(text: string): boolean;
 }
 
 /** COMPANION_TTS_PROVIDER = breeze(기본, 키 있을 때) | fake | off. 키 없는 breeze 는 off 로 본다. */
@@ -146,10 +148,13 @@ export class BreezeTts implements TtsProvider {
   }
 }
 
-export function makeTts(cfg: TtsConfig, observer: Observability, fetchImpl?: typeof fetch): TtsProvider | null {
-  if (cfg.provider === "fake") return new FakeTts();
-  if (cfg.provider === "breeze") return new BreezeTts(cfg, observer, fetchImpl);
-  return null;
+/**
+ * 제공자 조립: 캐시(고정 문장) → 동시 생성 한도 → 공급사. 가짜 TTS 도 같은 길을 지난다(시험이 실제 경로를 탄다).
+ */
+export function makeTts(cfg: TtsConfig, observer: Observability, fetchImpl?: typeof fetch): PhraseCache | null {
+  if (cfg.provider !== "fake" && cfg.provider !== "breeze") return null;
+  const base = cfg.provider === "fake" ? new FakeTts() : new BreezeTts(cfg, observer, fetchImpl);
+  return new PhraseCache(new GatedTts(base, new Semaphore(), observer), cfg.voiceId);
 }
 
 /** 공급사 전체 동시 생성 수를 제한한다(Starter: 최대 2). */
@@ -182,6 +187,147 @@ export class Semaphore {
     const next = this.queue.shift();
     if (next) next();
     else this.free++;
+  }
+}
+
+/**
+ * 공급사 동시 생성 한도(Starter 2)를 서버 안에서 지킨다: 자리가 없으면 줄을 서고(429를 받지 않는다), 기다린 시간을 로그로 남긴다.
+ * 자리는 스트림이 끝나거나 취소될 때 돌려준다.
+ */
+export class GatedTts implements TtsProvider {
+  constructor(
+    private readonly inner: TtsProvider,
+    private readonly sem: Semaphore,
+    private readonly observer: Observability,
+  ) {}
+
+  cached(text: string): boolean {
+    return this.inner.cached?.(text) ?? false;
+  }
+
+  warm(): void {
+    this.inner.warm?.();
+  }
+
+  async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
+    const t0 = performance.now();
+    await this.sem.acquire(signal);
+    const waited = Math.round(performance.now() - t0);
+    if (waited >= 1) this.observer.event("tts.queue_wait", { ms: waited });
+    let body: AsyncIterable<Uint8Array>;
+    try {
+      body = await this.inner.synth(text, signal);
+    } catch (e) {
+      this.sem.release();
+      throw e;
+    }
+    const sem = this.sem;
+    return (async function* () {
+      try {
+        yield* body;
+      } finally {
+        sem.release();
+      }
+    })();
+  }
+}
+
+/** 첫 조각을 일찍 자르는 규칙. 답 문장과 미리 만들어 두는 고정 문장이 같은 조각으로 나뉘어야 캐시가 맞는다. */
+export const FIRST_PIECE_OPTS = { firstClauseMin: 6, firstWordsMin: 10 } as const;
+
+const CACHE_MAX_BYTES = 50 * 1024 * 1024;
+
+/**
+ * 고정 문장의 PCM 을 메모리에만 둔다(D-10: 디스크에 쓰지 않는다). 키는 목소리+문장, 가장 오래 안 쓴 것부터 버려 50MB 를 넘지 않는다.
+ * prime 에 넣은 문장만 담는다(LLM 이 만든 문장은 담지 않는다). 적중하면 공급사 호출도, 동시 생성 자리도 쓰지 않는다.
+ */
+export class PhraseCache implements TtsProvider {
+  private readonly map = new Map<string, Uint8Array[]>();
+  private readonly keep = new Set<string>();
+  private bytes = 0;
+
+  constructor(
+    private readonly inner: TtsProvider,
+    private readonly voiceKey: string,
+    private readonly maxBytes = CACHE_MAX_BYTES,
+  ) {}
+
+  private key(text: string): string {
+    return `${this.voiceKey}\u0000${text}`;
+  }
+
+  get size(): { entries: number; bytes: number } {
+    return { entries: this.map.size, bytes: this.bytes };
+  }
+
+  cached(text: string): boolean {
+    return this.map.has(this.key(text));
+  }
+
+  warm(): void {
+    this.inner.warm?.();
+  }
+
+  async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
+    const k = this.key(text);
+    const hit = this.map.get(k);
+    if (hit) {
+      this.map.delete(k);
+      this.map.set(k, hit);
+      return (async function* () {
+        for (const c of hit) {
+          if (signal.aborted) return;
+          yield c;
+        }
+      })();
+    }
+    const body = await this.inner.synth(text, signal);
+    if (!this.keep.has(text)) return body;
+    const got: Uint8Array[] = [];
+    const store = (chunks: Uint8Array[]) => this.store(k, chunks);
+    return (async function* () {
+      for await (const c of body) {
+        got.push(c);
+        yield c;
+      }
+      if (!signal.aborted) store(got);
+    })();
+  }
+
+  private store(k: string, chunks: Uint8Array[]): void {
+    const size = chunks.reduce((n, c) => n + c.length, 0);
+    if (size === 0 || size > this.maxBytes) return;
+    const old = this.map.get(k);
+    if (old) this.bytes -= old.reduce((n, c) => n + c.length, 0);
+    this.map.delete(k);
+    this.map.set(k, chunks);
+    this.bytes += size;
+    for (const [ok, v] of this.map) {
+      if (this.bytes <= this.maxBytes) break;
+      this.map.delete(ok);
+      this.bytes -= v.reduce((n, c) => n + c.length, 0);
+    }
+  }
+
+  /** 문장을 하나씩 합성해 담는다(한 번에 자리 하나만 쓴다). 연속 2번 실패하면 멈춘다(키·크레딧 문제일 수 있다). */
+  async prime(texts: string[], signal: AbortSignal = new AbortController().signal): Promise<{ done: number; failed: number; entries: number; bytes: number }> {
+    for (const t of texts) this.keep.add(t);
+    let done = 0;
+    let failed = 0;
+    let streak = 0;
+    for (const text of texts) {
+      if (signal.aborted || streak >= 2) break;
+      if (this.cached(text)) continue;
+      try {
+        for await (const _ of await this.synth(text, signal)) void _;
+        done++;
+        streak = 0;
+      } catch {
+        failed++;
+        streak++;
+      }
+    }
+    return { done, failed, entries: this.map.size, bytes: this.bytes };
   }
 }
 
@@ -248,7 +394,8 @@ export class SentenceSplitter {
 export interface AudioSink {
   /** 정확히 한 번: 첫 오디오 조각이 준비되면 true(조각 전달보다 먼저), 첫 문장이 실패했거나 문장이 없으면 false. */
   onStart(ok: boolean): void;
-  onChunk(pcm: Uint8Array): void;
+  /** filler 는 답이 아니라 "음…" 같은 채움 소리의 조각이다. */
+  onChunk(pcm: Uint8Array, filler: boolean): void;
   /** 첫 문장 이후의 실패(오디오는 거기서 끊긴다). */
   onError(e: Error): void;
 }
@@ -258,10 +405,11 @@ interface Job {
   done: boolean;
   error: Error | undefined;
   wake: (() => void) | undefined;
+  filler: boolean;
 }
 
 /**
- * 문장이 완성되는 대로 TTS 를 시작하고(동시 2개), 결과 PCM 을 문장 순서대로 내보낸다.
+ * 문장이 완성되는 대로 TTS 를 시작하고, 결과 PCM 을 문장 순서대로 내보낸다. 동시 생성 수 제한은 제공자(GatedTts)가 맡는다.
  * 취소(signal)되면 아무것도 더 내보내지 않는다. 오디오는 메모리에서만 흐른다.
  */
 export class AudioPipeline {
@@ -274,7 +422,6 @@ export class AudioPipeline {
 
   constructor(
     private readonly tts: TtsProvider,
-    private readonly sem: Semaphore,
     private readonly signal: AbortSignal,
     private readonly sink: AudioSink,
   ) {
@@ -283,9 +430,9 @@ export class AudioPipeline {
     signal.addEventListener("abort", () => this.finish(), { once: true });
   }
 
-  add(sentence: string): void {
+  add(sentence: string, filler = false): void {
     if (this.failed) return;
-    const job: Job = { chunks: [], done: false, error: undefined, wake: undefined };
+    const job: Job = { chunks: [], done: false, error: undefined, wake: undefined, filler };
     this.jobs.push(job);
     void this.generate(job, sentence);
     this.kick?.();
@@ -300,15 +447,10 @@ export class AudioPipeline {
   private async generate(job: Job, sentence: string): Promise<void> {
     const notify = () => job.wake?.();
     try {
-      await this.sem.acquire(this.signal);
-      try {
-        for await (const c of await this.tts.synth(sentence, this.signal)) {
-          if (this.signal.aborted) break;
-          job.chunks.push(c);
-          notify();
-        }
-      } finally {
-        this.sem.release();
+      for await (const c of await this.tts.synth(sentence, this.signal)) {
+        if (this.signal.aborted) break;
+        job.chunks.push(c);
+        notify();
       }
     } catch (e) {
       job.error = e as Error;
@@ -333,7 +475,7 @@ export class AudioPipeline {
             started = true;
             this.sink.onStart(true);
           }
-          this.sink.onChunk(c);
+          this.sink.onChunk(c, job.filler);
           sent++;
         } else if (job.done) {
           break;
