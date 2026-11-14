@@ -564,7 +564,8 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
     // 기어 P로 바뀜: 첫 정차(인사·첫 만남) 또는 도착(3초 뒤 한마디)
     if (gearP && prev.gear !== "P") {
-      if (baseline && !pro.greetChecked) {
+      // 첫 정차: 연결 뒤 처음 받은 ctx이거나, 기어를 아직 몰랐다가(Pleos 기어 리스너가 늦게 답함) 처음 알게 된 P.
+      if ((baseline || prev.gear === undefined) && !pro.greetChecked && !pro.drove) {
         firstStop(ws, cur);
         return;
       }
