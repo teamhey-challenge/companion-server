@@ -10,6 +10,7 @@ import type { Observability } from "./observe";
 import { ARRIVAL_DELAY_MS, MAX_MEMORY_RECALLS, RANGE_REFILLED_KM, detectEvents, eventAllowed, fuelKind, intervalMs, isNight, isPostpone, kstDay, newProState, wiperOn, type EventReason, type ProState, type Reason } from "./proactive";
 import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
+import { cleanDestination, pickRegion } from "./trips";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
 import { recentForProactive } from "./memory-lines";
@@ -31,6 +32,8 @@ const LLM_DEADLINE_MS = 20_000;
 const QUIET_AFTER_REPLY_MS = 6000;
 const FIRST_STOP_RETRY_MS = 1000;
 const RECENT_TURNS = 6;
+/** 이보다 짧은 D→P는 기어 깜빡임으로 보고 길로 세지 않는다. */
+const MIN_TRIP_MS = 30_000;
 const PROACTIVE_MAX_TOKENS = 80;
 /** 첫 토큰이 이 시간 안에 안 오면 같은 요청을 한 번 더 보내 먼저 오는 쪽을 쓴다(2026-11-14 측정: 정상 1.4~1.6초, 꼬리 4~9초). */
 const HEDGE_AFTER_MS = 2000;
@@ -84,6 +87,8 @@ interface Conn {
   /** 마지막 답에 끼워 넣은 기억(그거 잊어줘의 "그거") */
   lastMemoryId?: string;
   quietUntil: number;
+  /** 이번 주행(D 시작 ~ P)의 시작. 시각·주행계·이름뿐이고 좌표는 없다. */
+  trip?: { startedAt: number; odoKm: number | null; destination: string | null; region: string | null };
 }
 
 /** 업그레이드 때 붙이는 연결별 데이터. 티켓에서 온 installId·sessionId와 현재 턴 상태를 든다. */
@@ -145,6 +150,8 @@ export interface TalkGuard {
   llmDeadlineMs?: number;
   /** 기억 담은 먼저 말이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
   proactiveLlmFirstMs?: number;
+  /** 데모 전용: 차가 지역 이름을 못 줄 때 쓰는 고정 시·군·구("경기도 하남시"). 그 길은 demo 표시가 붙는다. */
+  demoRegion?: string;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -553,6 +560,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         return fail(ws, "rate_limited", t.id);
       }
     }
+    if (isParked({ ...conn(ws.data).ctx, ...t.ctx })) store.addParkedTurn?.(ws.data.installId);
     t.running = true;
     let plan: Plan;
     try {
@@ -717,6 +725,33 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
     const s = store.getSettings(d.installId);
     const gap = intervalMs(s.proactive);
+    // 함께 다닌 길: 기어 D에서 시작, P로 돌아오면 한 번 기록한다(기억 동의가 없으면 저장소가 기록하지 않는다). 좌표는 없다.
+    // odoKm(주행계), destName(내비 목적지 이름), region(차가 장치 안에서 바꾼 시·군·구 이름)은 차가 줄 때만 있고, 없으면 비운다.
+    if (cur.gear === "D" && !c.trip) {
+      c.trip = { startedAt: now, odoKm: typeof cur.odoKm === "number" ? cur.odoKm : null, destination: null, region: null };
+    }
+    if (c.trip && cur.gear === "D") {
+      if (typeof cur.destName === "string" && cur.destName.trim()) c.trip.destination = cleanDestination(cur.destName);
+      if (typeof cur.region === "string") c.trip.region = cur.region;
+    }
+    if (c.trip && cur.gear === "P" && prev.gear !== "P") {
+      const trip = c.trip;
+      c.trip = undefined;
+      if (now - trip.startedAt >= MIN_TRIP_MS) {
+        const odo = typeof cur.odoKm === "number" && trip.odoKm !== null ? cur.odoKm - trip.odoKm : null;
+        const pick = pickRegion(trip.region, trip.destination, opts?.demoRegion);
+        store.recordTrip?.(d.installId, {
+          startedAt: trip.startedAt,
+          endedAt: now,
+          distanceKm: odo !== null && odo >= 0 ? Math.round(odo * 10) / 10 : null,
+          destination: trip.destination,
+          sido: pick?.sido ?? null,
+          sigungu: pick?.sigungu ?? null,
+          regionDemo: pick?.demo ?? false,
+        });
+      }
+    }
+
     const gearP = cur.gear === "P";
     const navi = cur.naviGuiding === true;
 
