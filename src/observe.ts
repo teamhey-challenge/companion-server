@@ -22,12 +22,16 @@ export const NULL_OBSERVER: RelayObserver = {
 /** 로그에 쓰는 id의 짧은 해시 */
 export const idHash = shortId;
 
-/** 한 턴의 지연 기록. 시간은 턴 시작(서버가 turn.end 를 받은 뒤 말하기를 시작한 때)부터 잰다. */
+/** 한 턴의 지연 기록. 시간은 서버가 말하기를 시작한 때(turn.end 처리)부터 잰다. */
 export interface TurnTiming {
   /** 모델을 쓰지 않은 고정 문구 턴은 null */
   llmFirstTokenMs: number | null;
-  /** 첫 오디오 바이트까지. TTS 없음/실패면 null */
+  /** 진짜 답의 첫 오디오 바이트까지. TTS 없음/실패면 null(채움말은 세지 않는다) */
   firstTtsByteMs: number | null;
+  /** 채움말을 포함해 처음 소리가 난 때 */
+  firstAudioMs?: number | null;
+  /** 채움말이 나갔다면 그 첫 바이트 시각 */
+  fillerMs?: number | null;
   totalMs: number;
   model: string;
 }
@@ -41,14 +45,16 @@ export interface LatencySummary {
   n: number;
   llmFirstTokenMs: Pct | null;
   firstTtsByteMs: Pct | null;
+  firstAudioMs: Pct | null;
+  fillers: number;
   totalMs: Pct | null;
   models: Record<string, number>;
 }
 
 const TIMING_WINDOW = 50;
 
-function stat(values: Array<number | null>): Pct | null {
-  const v = values.filter((x): x is number => x !== null).sort((a, b) => a - b);
+function stat(values: Array<number | null | undefined>): Pct | null {
+  const v = values.filter((x): x is number => typeof x === "number").sort((a, b) => a - b);
   if (!v.length) return null;
   const at = (p: number) => v[Math.min(v.length - 1, Math.ceil((p / 100) * v.length) - 1)]!;
   return { p50: at(50), p95: at(95) };
@@ -100,7 +106,15 @@ export class Observability implements RelayObserver {
   turn(t: TurnTiming): void {
     this.timings.push(t);
     if (this.timings.length > TIMING_WINDOW) this.timings.shift();
-    this.emit({ ev: "talk.timing", llm_first_token_ms: t.llmFirstTokenMs ?? -1, first_tts_byte_ms: t.firstTtsByteMs ?? -1, total_ms: t.totalMs, model: t.model });
+    this.emit({
+      ev: "talk.timing",
+      llm_first_token_ms: t.llmFirstTokenMs ?? -1,
+      first_tts_byte_ms: t.firstTtsByteMs ?? -1,
+      first_audio_ms: t.firstAudioMs ?? -1,
+      filler_ms: t.fillerMs ?? -1,
+      total_ms: t.totalMs,
+      model: t.model,
+    });
   }
 
   latency(): LatencySummary {
@@ -110,6 +124,8 @@ export class Observability implements RelayObserver {
       n: this.timings.length,
       llmFirstTokenMs: stat(this.timings.map((t) => t.llmFirstTokenMs)),
       firstTtsByteMs: stat(this.timings.map((t) => t.firstTtsByteMs)),
+      firstAudioMs: stat(this.timings.map((t) => t.firstAudioMs)),
+      fillers: this.timings.filter((t) => typeof t.fillerMs === "number").length,
       totalMs: stat(this.timings.map((t) => t.totalMs)),
       models,
     };

@@ -12,7 +12,7 @@ import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
-import { AudioPipeline, PCM_FORMAT, Semaphore, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
+import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-haiku-4-5",
@@ -21,10 +21,8 @@ const DEFAULT_MODELS: Record<string, string> = {
   "openai-compatible": "chat-fast",
 };
 
-/** 첫 소리를 빨리 내려고, 첫 조각만 쉼표에서도 끊는 최소 글자 수. */
-const FIRST_CLAUSE_MIN = 6;
-/** 쉼표·문장 끝이 없어도, 첫 조각은 이만큼 모이면(마지막 띄어쓰기에서) 바로 TTS 로 보낸다. */
-const FIRST_WORDS_MIN = 10;
+/** 첫 토큰이 이 시간 안에 안 오면, 미리 만들어 둔 짧은 채움말을 한 번 들려준다(차에서 약 1.5초 안에 소리가 나도록). */
+const FILLER_AFTER_MS = 1200;
 /** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
 const QUIET_AFTER_REPLY_MS = 6000;
 const RECENT_TURNS = 6;
@@ -122,6 +120,8 @@ export interface TalkGuard {
   clock?: Clock;
   /** 기어가 P가 된 뒤 도착 인사까지(F10, 기본 3초). 시험에서만 바꾼다. */
   arrivalDelayMs?: number;
+  /** 첫 토큰이 이 시간 안에 안 오면 채움말을 낸다(기본 1.2초). 시험에서만 바꾼다. */
+  fillerAfterMs?: number;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -168,11 +168,11 @@ async function* noneGuard(src: AsyncIterable<string>, fallback: string): AsyncGe
 /** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 1003으로 닫는다. */
 export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: TalkGuard) {
   const provider = getProvider(cfg.providerName);
-  const sem = new Semaphore();
   const store: TalkStore = opts?.store ?? new InMemoryTalkStore();
   const hub = opts?.hub ?? new TalkHub();
   const clock = opts?.clock ?? new SystemClock();
   const arrivalDelay = opts?.arrivalDelayMs ?? ARRIVAL_DELAY_MS;
+  const fillerAfter = opts?.fillerAfterMs ?? FILLER_AFTER_MS;
   const fetchImpl = opts?.fetchImpl ?? fetch;
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
@@ -227,14 +227,19 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       held = [];
     };
     let ttsCause = "none";
+    let firstAudio: number | null = null;
+    let fillerMs: number | null = null;
     const pipeline = tts
-      ? new AudioPipeline(tts, sem, t.abort.signal, {
+      ? new AudioPipeline(tts, t.abort.signal, {
           onStart: (ok) => {
             if (!ok) observer.event("tts.none", { cause: ttsCause });
             start(ok ? PCM_FORMAT : "none");
           },
-          onChunk: (pcm) => {
-            firstByte ??= Math.round(performance.now() - t0);
+          onChunk: (pcm, filler) => {
+            const at = Math.round(performance.now() - t0);
+            firstAudio ??= at;
+            if (filler) fillerMs ??= at;
+            else firstByte ??= at;
             if (!t.cancelled) ws.send(pcm);
           },
           onError: (e) => {
@@ -267,10 +272,18 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       return false;
     };
 
-    const splitter = new SentenceSplitter({ firstClauseMin: FIRST_CLAUSE_MIN, firstWordsMin: FIRST_WORDS_MIN });
+    const splitter = new SentenceSplitter(FIRST_PIECE_OPTS);
     let first: number | null = null;
     let firstByte: number | null = null;
     const meta: { model?: string } = {};
+    // 첫 토큰이 늦으면 미리 만들어 둔 짧은 채움말을 한 번만 들려준다. 캐시에 있을 때만(공급사를 새로 부르지 않는다), 사용자 말에 답하는 턴만.
+    const fillerLine = pick(L.thinking, plan.speech);
+    const fillerTimer =
+      pipeline && plan.llm && !t.proactive && tts?.cached?.(fillerLine)
+        ? setTimeout(() => {
+            if (first === null && !t.cancelled && !llmAbort.signal.aborted) pipeline.add(fillerLine, true);
+          }, fillerAfter)
+        : undefined;
     try {
       let src: AsyncIterable<string>;
       if (plan.llm) {
@@ -305,7 +318,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const full = spoken.join(" ");
       emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
       observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model, proactive: Number(t.proactive === true) });
-      observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
+      observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, firstAudioMs: firstAudio, fillerMs, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
       c.recent.push({ u: plan.userText, a: full });
       if (c.recent.length > RECENT_TURNS) c.recent.shift();
       c.quietUntil = clock.now() + QUIET_AFTER_REPLY_MS;
@@ -317,6 +330,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       observer.error("talk.llm_failed", String((e as Error).message));
       send(ws, { type: "error", code: "llm_failed", turnId: t.id, message: String((e as Error).message).slice(0, 300) });
     } finally {
+      clearTimeout(fillerTimer);
       if (ws.data.turn === t) ws.data.turn = undefined;
     }
   }
