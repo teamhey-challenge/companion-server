@@ -87,6 +87,9 @@ export class ApiStore {
       if (!purge) return;
       this.deleteAllMemory(installId);
       this.db.query("DELETE FROM talk_state WHERE install_id = ?1").run(installId);
+      // Review rule (user privacy): withdrawing consent deletes every stored item at once, not only memory rows.
+      this.db.query("DELETE FROM vehicle_events WHERE install_id = ?1").run(installId);
+      this.db.query("UPDATE settings SET nickname = NULL WHERE install_id = ?1").run(installId);
     }
   }
 
