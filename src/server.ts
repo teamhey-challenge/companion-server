@@ -1,4 +1,6 @@
-import type { RegisterResponse, SessionResponse } from "../shared/packages/protocol/src/index";
+import type { RegisterResponse, SessionResponse, Settings } from "../shared/packages/protocol/src/index";
+import { handleApi } from "./api";
+import { ApiStore } from "./api-store";
 import { bearer, clientIp, isLocalRequest, safeEqual, type GuardConfig } from "./auth";
 import { SystemClock, type Clock } from "./clock";
 import type { Observability } from "./observe";
@@ -21,6 +23,10 @@ export interface ServerOptions {
   /** 서버 TTS. 없으면 reply.start.audio = "none". */
   tts?: TtsProvider | null;
   clock?: Clock;
+  /** ServerTalk 허브: 설정이 바뀌면 그 차의 열린 소켓에 settings 프레임을 보낸다. */
+  hub?: { pushSettings(installId: string, settings: Settings): void };
+  /** 토큰 없는 공개 경로(코드 조회·claim)의 IP별 분당 한도. */
+  publicPerMin?: number;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -34,6 +40,7 @@ export function createServer(o: ServerOptions): RunningServer {
   const clock = o.clock ?? new SystemClock();
   const limiter = new RateLimiter(clock);
   const cars = new CarStore(o.dbPath, clock);
+  const api = new ApiStore(cars.db, clock);
   const tickets = new TicketBook(clock);
 
   const throttled = (ip: string, bucket: string, max: number) => {
@@ -91,6 +98,15 @@ export function createServer(o: ServerOptions): RunningServer {
         if (throttled(ip, "ses", o.guard.httpPerMin)) return json({ error: "rate_limited" }, 429);
         return session(req);
       }
+      const apiRes = await handleApi(req, url, ip, {
+        api,
+        cars,
+        pushSettings: o.hub ? (id, s) => o.hub!.pushSettings(id, s) : undefined,
+        throttled,
+        publicPerMin: o.publicPerMin ?? 20,
+        reject: (r) => o.observer.reject(r),
+      });
+      if (apiRes) return apiRes;
       if (url.pathname !== "/v1/talk") return new Response("not found", { status: 404 });
       if (throttled(ip, "up", o.guard.upgradesPerMin)) return new Response("rate limited", { status: 429 });
       const ticket = url.searchParams.get("ticket");
