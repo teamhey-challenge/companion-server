@@ -22,9 +22,9 @@ const DEFAULT_MODELS: Record<string, string> = {
 };
 
 /** 첫 소리를 빨리 내려고, 첫 조각만 쉼표에서도 끊는 최소 글자 수. */
-const FIRST_CLAUSE_MIN = 8;
+const FIRST_CLAUSE_MIN = 6;
 /** 쉼표·문장 끝이 없어도, 첫 조각은 이만큼 모이면(마지막 띄어쓰기에서) 바로 TTS 로 보낸다. */
-const FIRST_WORDS_MIN = 12;
+const FIRST_WORDS_MIN = 10;
 /** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
 const QUIET_AFTER_REPLY_MS = 6000;
 const RECENT_TURNS = 6;
@@ -596,6 +596,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       switch (f.type) {
         case "turn.start":
           cancel(d);
+          opts?.tts?.warm?.();
           clearArrival(conn(d));
           d.turn = { id: f.turnId, trigger: f.trigger, text: "", ctx: {}, abort: new AbortController(), cancelled: false, running: false };
           return;

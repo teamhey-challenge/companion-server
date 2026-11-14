@@ -31,6 +31,8 @@ export class TtsError extends Error {
 /** 한 문장의 PCM 청크 스트림. 취소하면 signal 로 끊는다. */
 export interface TtsProvider {
   synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>>;
+  /** 곧 synth 가 불릴 것을 알리는 신호. 연결(TCP+TLS)을 미리 열어 둔다. 실패해도 조용히 넘어간다. */
+  warm?(): void;
 }
 
 /** COMPANION_TTS_PROVIDER = breeze(기본, 키 있을 때) | fake | off. 키 없는 breeze 는 off 로 본다. */
@@ -48,7 +50,12 @@ export class FakeTts implements TtsProvider {
   calls: string[] = [];
   active = 0;
   maxActive = 0;
+  warmed = 0;
   constructor(private readonly delayMs = 0) {}
+
+  warm(): void {
+    this.warmed++;
+  }
 
   async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
     this.calls.push(text);
@@ -91,6 +98,15 @@ export class BreezeTts implements TtsProvider {
       body: JSON.stringify({ text, model_id: MODEL_ID, language_code: LANGUAGE, voice_settings: { use_speaker_boost: true } }),
       signal,
     });
+  }
+
+  warm(): void {
+    // Bun 이 같은 호스트의 연결 풀을 재사용하므로, 첫 요청의 TLS 핸드셰이크(약 0.4초)를 LLM 을 기다리는 동안 끝내 둔다.
+    try {
+      fetch.preconnect(BREEZE_BASE);
+    } catch {
+      /* 미리 연결은 최적화일 뿐 */
+    }
   }
 
   async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {

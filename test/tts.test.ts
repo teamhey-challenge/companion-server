@@ -185,6 +185,12 @@ describe("server with TTS", () => {
     expect(order.filter((o) => o === "reply.delta").length).toBeGreaterThan(0);
   });
 
+  test("turn.start pre-warms the TTS connection once per turn", async () => {
+    const fake = new FakeTts();
+    await turn(fake, two);
+    expect(fake.warmed).toBe(1);
+  });
+
   test("TTS off -> audio none, no binary frames", async () => {
     const { order, bytes } = await turn(null, two);
     expect(order[0]).toBe("start:none");
