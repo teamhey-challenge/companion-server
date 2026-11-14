@@ -11,6 +11,8 @@ export interface TalkStore {
   patchSettings(installId: string, patch: Partial<Settings>): Settings;
   /** 기억 동의가 있고 settings.memoryEnabled 가 켜져 있을 때만 true. 쓰기와 떠올리기 모두 이 값을 따른다. */
   memoryAllowed(installId: string): boolean;
+  /** AC-4.9-05: `record` 와 `external_ai` 동의가 둘 다 허용일 때만 true. 아니면 LLM·TTS 로 아무것도 보내지 않는다. */
+  talkAllowed(installId: string): boolean;
   /** 최신순 */
   listMemory(installId: string, limit: number): MemoryItem[];
   addMemory(installId: string, kind: MemoryKind, text: string): MemoryItem;
@@ -28,6 +30,8 @@ export class InMemoryTalkStore implements TalkStore {
   private readonly state = new Map<string, TalkState>();
   /** 시험에서 동의 철회를 흉내 낸다. */
   consentGranted = true;
+  /** 시험에서 녹음·외부 AI 동의가 없는 차를 흉내 낸다. */
+  talkConsent = true;
 
   getSettings(id: string): Settings {
     return { ...(this.settings.get(id) ?? DEFAULT_SETTINGS) };
@@ -39,6 +43,9 @@ export class InMemoryTalkStore implements TalkStore {
   }
   memoryAllowed(id: string): boolean {
     return this.consentGranted && this.getSettings(id).memoryEnabled;
+  }
+  talkAllowed(): boolean {
+    return this.talkConsent;
   }
   listMemory(id: string, limit: number): MemoryItem[] {
     return [...(this.memory.get(id) ?? [])].reverse().slice(0, limit);

@@ -72,7 +72,7 @@ export class ApiStore {
   }
 
   /** record·memory 철회는 그 차의 기억과 요약을 바로 지운다. memory 철회는 기억 기능도 끄고, memory 동의가 철회·없음에서 새로 허용되면 켠다. 이미 허용된 상태의 반복 허용은 설정 토글을 건드리지 않는다. */
-  setConsent(installId: string, type: ConsentType, version: string, granted: boolean): void {
+  setConsent(installId: string, type: ConsentType, version: string, granted: boolean, purge = true): void {
     const wasGranted = this.consentGranted(installId, type) === true;
     this.db
       .query(
@@ -82,8 +82,9 @@ export class ApiStore {
       .run(installId, type, version, granted ? 1 : 0, this.clock.now());
     if (granted && type === "memory" && !wasGranted) this.patchSettings(installId, { memoryEnabled: true });
     if (!granted && (type === "record" || type === "memory")) {
-      this.deleteAllMemory(installId);
       if (type === "memory") this.patchSettings(installId, { memoryEnabled: false });
+      if (!purge) return;
+      this.deleteAllMemory(installId);
       this.db.query("DELETE FROM talk_state WHERE install_id = ?1").run(installId);
     }
   }
@@ -153,8 +154,9 @@ export class ApiStore {
     this.db.transaction(() => {
       this.db.query("DELETE FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL").run(installId);
       this.db.query("UPDATE pairings SET claimed_at = ?2, phone_hash = ?3 WHERE code = ?1").run(code, now, sha256(phoneToken));
-      this.setConsent(installId, "record", "phone-claim", record);
-      this.setConsent(installId, "memory", "phone-claim", memory);
+      // 폰 연결은 앞으로의 동의만 바꾼다. 체크를 끈 채 다시 연결해도 차의 기억·F2 상태는 지우지 않고(해제 때 기억 유지와 같은 규칙), 삭제는 DELETE /v1/consents 로만 한다.
+      this.setConsent(installId, "record", "phone-claim", record, false);
+      this.setConsent(installId, "memory", "phone-claim", memory, false);
     })();
     return { ok: true, phoneToken, character: characterFor(installId) };
   }
@@ -238,6 +240,11 @@ export class ApiStore {
   /** 기억 동의(철회 안 함)와 설정 모두 켜져 있고 녹음 동의도 철회되지 않았을 때만 기억을 쓰고 읽는다. */
   memoryAllowed(installId: string): boolean {
     return this.consentGranted(installId, "memory") === true && this.consentGranted(installId, "record") !== false && this.getSettings(installId).memoryEnabled;
+  }
+
+  /** 녹음과 외부 AI 처리 동의가 둘 다 있어야 말을 LLM·TTS 로 보낸다(AC-4.9-05). 기록이 없으면 거부다. */
+  talkAllowed(installId: string): boolean {
+    return this.consentGranted(installId, "record") === true && this.consentGranted(installId, "external_ai") === true;
   }
 
   // ---- 차량 이벤트(좌표는 호출 전에 버린다) ----

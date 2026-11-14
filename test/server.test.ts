@@ -46,9 +46,11 @@ function start(guard: Partial<ServerOptions["guard"]> = {}, dbPath = ":memory:",
 const post = (url: string, headers: Record<string, string>, body: unknown = {}) =>
   fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
-async function registerAndSession(base: string, installId = "install-0001") {
+/** `grant: false` leaves the car without consents (the state before C1). */
+async function registerAndSession(base: string, installId = "install-0001", grant = true) {
   const reg = await post(`${base}/v1/cars/register`, { "X-Provision-Secret": SECRET }, { installId });
   const { carToken } = (await reg.json()) as { carToken: string };
+  if (grant) for (const type of ["record", "external_ai"]) await post(`${base}/v1/consents`, { Authorization: `Bearer ${carToken}` }, { type, version: "1", granted: true, channel: "car" });
   const ses = await post(`${base}/v1/sessions`, { Authorization: `Bearer ${carToken}` });
   return { carToken, ses, ...((await ses.json()) as { wsTicket: string; sessionId: string }) };
 }

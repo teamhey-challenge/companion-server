@@ -438,6 +438,12 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   }
 
   async function runUser(ws: Ws, t: Turn): Promise<void> {
+    // AC-4.9-05: no record + external_ai consent (never given, or withdrawn while connected) -> nothing goes to the LLM or TTS.
+    if (!store.talkAllowed(ws.data.installId)) {
+      ws.data.turn = undefined;
+      observer.reject("talk.consent_required");
+      return fail(ws, "consent_required", t.id);
+    }
     if (opts) {
       try {
         opts.limiter.hit(`turn:${ws.data.id}`, opts.guard.turnsPerMin, 60_000);
@@ -469,6 +475,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const d = ws.data;
     const c = conn(d);
     if (d.turn || clock.now() < c.quietUntil) return false;
+    if (!store.talkAllowed(d.installId)) return false;
     if (plan.llm && !cfg.apiKey) return false;
     const t: Turn = { id: `p-${crypto.randomUUID().slice(0, 12)}`, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
     d.turn = t;

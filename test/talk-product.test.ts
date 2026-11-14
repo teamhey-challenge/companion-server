@@ -105,6 +105,11 @@ class Car {
   async consent(type: string, granted = true) {
     await this.api("POST", "/v1/consents", { type, version: "1", granted, channel: "car" });
   }
+  /** C1 의 필수 동의: 녹음과 외부 AI 처리. */
+  async grantTalk() {
+    await this.consent("record");
+    await this.consent("external_ai");
+  }
   close() { this.ws.close(); }
 }
 
@@ -112,7 +117,7 @@ const newLlm = (): Llm => ({ replies: [], extraction: "NONE", calls: [], extract
 /** 첫 만남은 끝난 차(기본값). 이벤트 시험이 질문에 가로막히지 않게 한다. */
 async function readyCar(llm: Llm, tts = false) {
   const car = await Car.connect(boot(llm, tts));
-  await car.consent("record");
+  await car.grantTalk();
   await car.consent("memory");
   return car;
 }
@@ -122,7 +127,7 @@ const drive = { gear: "D", speedKmh: 40, naviGuiding: false };
 describe("LLM deadline (PLEOS-134)", () => {
   test("a stream that stalls after the first token ends the turn with error llm_failed and the next turn is accepted", async () => {
     const car = await Car.connect(boot(newLlm(), false, undefined, { llmDeadlineMs: 150, stall: true }));
-    await car.consent("record");
+    await car.grantTalk();
     await car.consent("memory");
     await car.say("오늘 날씨 어때?", "d1");
     expect(car.frames.find((f) => f.turnId === "d1" && f.type === "error")?.code).toBe("llm_failed");
@@ -206,6 +211,7 @@ describe("proactive decision", () => {
     car.close();
 
     const car2 = await Car.connect(boot(newLlm()), "install-0002");
+    await car2.grantTalk();
     car2.ctx({ gear: "D", speedKmh: 30 });
     car2.ctx({ gear: "P", speedKmh: 0 });
     car2.ctx({ gear: "D", speedKmh: 20 });
@@ -216,6 +222,7 @@ describe("proactive decision", () => {
 
   test("F2: a new car's first P asks speech, then nickname, then chat level; answers become settings", async () => {
     const car = await Car.connect(boot(newLlm()));
+    await car.grantTalk();
     car.ctx({ gear: "P", speedKmh: 0 });
     await car.until((f) => f.some((x) => x.type === "reply.end"));
     expect(proactives(car)[0]!.reason).toBe("meet");
@@ -234,7 +241,7 @@ describe("proactive decision", () => {
     const shifted: Clock = { now: () => real.now() + offset, setTimeout: (f, ms) => real.setTimeout(f, ms), clearTimeout: (h) => real.clearTimeout(h) };
     const b = boot(newLlm(), false, shifted);
     const first = await Car.connect(b);
-    await first.consent("record");
+    await first.grantTalk();
     first.ctx({ gear: "P", speedKmh: 0 });
     await first.until((f) => f.some((x) => x.type === "reply.end"));
     await first.say("편하게 해", "g1");
@@ -295,6 +302,7 @@ describe("memory", () => {
     const llm = newLlm();
     llm.extraction = "FACT: 내일 면접이 있다";
     const car = await Car.connect(boot(llm));
+    await car.grantTalk();
     await car.say("내일 면접 보러 가는데 너무 떨리네", "m1");
     await Bun.sleep(150);
     expect(llm.extractCalls).toBe(0);
@@ -343,6 +351,47 @@ describe("memory", () => {
     const reply = await car.say("면접 얘기 잊어줘", "m2", { gear: "D", speedKmh: 50 });
     expect(reply).toContain("운전 중");
     expect((await car.memory()).length).toBe(1);
+    car.close();
+  });
+});
+
+describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
+  test("a car with no consent: turn -> consent_required, no LLM call, no proactive", async () => {
+    const llm = newLlm();
+    const car = await Car.connect(boot(llm, true));
+    car.ctx({ gear: "P", speedKmh: 0 });
+    await Bun.sleep(200);
+    expect(proactives(car)).toEqual([]);
+    await car.say("안녕 오늘 날씨 어때", "c1");
+    expect(car.frames.find((f) => f.turnId === "c1")).toEqual({ type: "error", code: "consent_required", turnId: "c1" });
+    expect(llm.calls.length).toBe(0);
+    expect(llm.extractCalls).toBe(0);
+    car.close();
+  });
+
+  test("record alone is not enough: external_ai is required too", async () => {
+    const llm = newLlm();
+    const car = await Car.connect(boot(llm));
+    await car.consent("record");
+    await car.say("안녕 오늘 날씨 어때", "c1");
+    expect(car.frames.find((f) => f.turnId === "c1")?.code).toBe("consent_required");
+    expect(llm.calls.length).toBe(0);
+    car.close();
+  });
+
+  test("withdrawal while connected stops the next turn and the next proactive", async () => {
+    const llm = newLlm();
+    const car = await readyCar(llm);
+    expect(await car.say("안녕 오늘 날씨 어때", "c1")).not.toBe("");
+    const calls = llm.calls.length;
+    expect((await car.api("DELETE", "/v1/consents/external_ai")).status).toBe(204);
+    await car.say("또 물어볼게 오늘 뭐 하지", "c2");
+    expect(car.frames.find((f) => f.turnId === "c2")?.code).toBe("consent_required");
+    expect(llm.calls.length).toBe(calls);
+    car.ctx({ gear: "D", speedKmh: 40, wiper: "off" });
+    car.ctx({ gear: "D", speedKmh: 40, wiper: "on" });
+    await Bun.sleep(200);
+    expect(proactives(car)).toEqual([]);
     car.close();
   });
 });

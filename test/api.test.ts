@@ -180,6 +180,23 @@ test("claim records consents; unpair kills phone token but keeps memory; re-pair
   expect((await memory(a)).items.length).toBe(2);
 });
 
+test("re-pair with the memory box unchecked keeps memory and F2 state, only future consent changes (PLEOS-136)", async () => {
+  const { call, car, pair, newCode, seedMemory, memory } = boot();
+  const a = await car("install-aaaa1");
+  await pair(a, true);
+  seedMemory("install-aaaa1", 3);
+  const code = await newCode(a);
+  const r = await call("POST", `/v1/pairings/${code}/claim`, undefined, { record: true, memory: false });
+  const { phoneToken } = (await r.json()) as { phoneToken: string };
+  expect((await memory(a)).items.length).toBe(3);
+  const cons: { consents: { type: string; granted: boolean }[] } = await (await call("GET", "/v1/consents", phoneToken)).json();
+  expect(cons.consents.find((c) => c.type === "memory")?.granted).toBe(false);
+  expect(await (await call("GET", "/v1/settings", phoneToken)).json()).toMatchObject({ memoryEnabled: false });
+  // an explicit withdrawal still deletes
+  expect((await call("DELETE", "/v1/consents/memory", a)).status).toBe(204);
+  expect((await memory(a)).items.length).toBe(0);
+});
+
 test("public pairing lookup is rate limited per IP", async () => {
   const { call } = boot(3);
   const codes = ["AAAAAAAA", "BBBBBBBB", "CCCCCCCC", "DDDDDDDD"];
