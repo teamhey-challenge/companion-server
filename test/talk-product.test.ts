@@ -6,6 +6,7 @@ import { FakeTts } from "../src/tts";
 import { checkInput, checkOutput } from "../src/safety";
 import { parseForget, parseSpeechChange, answerNickname, answerChat } from "../src/intents";
 import { SentenceSplitter } from "../src/tts";
+import { SentenceCap } from "../src/sentence-cap";
 
 const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 50 };
@@ -23,7 +24,7 @@ const sse = (text: string) =>
 
 interface Llm { replies: string[]; extraction: string; calls: { system: string; user: string }[]; extractCalls: number }
 
-function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean } = {}) {
+function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string } = {}) {
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
@@ -32,6 +33,17 @@ function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: num
     llmDeadlineMs: extra.llmDeadlineMs,
     tts: tts ? new FakeTts() : null,
     fetchImpl: (async (_u: string, init: RequestInit) => {
+      if (extra.stallAfter) {
+        // 문장을 몇 개 보낸 뒤 멈추는 공급사: 서버가 문장 상한에서 스트림을 끊어야 턴이 끝난다.
+        const enc = new TextEncoder();
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: extra.stallAfter } }] })}\n\n`));
+            init.signal?.addEventListener("abort", () => c.error(new Error("aborted")), { once: true });
+          },
+        });
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      }
       if (extra.stall) {
         // 첫 글자만 보내고 멈추는 공급사: 끊기(abort) 전에는 스트림이 끝나지 않는다.
         const enc = new TextEncoder();
@@ -123,6 +135,60 @@ async function readyCar(llm: Llm, tts = false) {
 }
 const proactives = (car: Car) => car.frames.filter((f) => f.type === "proactive");
 const drive = { gear: "D", speedKmh: 40, naviGuiding: false };
+
+describe("sentence cap (PLEOS-125)", () => {
+  const long = "오늘 날씨 좋다. 같이 드라이브하니까 기분 좋아. 점심은 뭐 먹을까? 국밥도 좋고 떡볶이도 좋아. 어떤 게 땡겨? 말해 줘!";
+  const park = { gear: "P", speedKmh: 0 };
+
+  test("driving: the reply stops after the 2nd sentence; deltas, reply.end and the next prompt all carry only what was said", async () => {
+    const llm = newLlm();
+    llm.replies = [long, "그래!"];
+    const car = await readyCar(llm, true);
+    const text = await car.say("안녕", "c1", drive);
+    expect(text).toBe("오늘 날씨 좋다. 같이 드라이브하니까 기분 좋아.");
+    const deltas = car.frames.filter((f) => f.turnId === "c1" && f.type === "reply.delta").map((f) => f.text).join("");
+    expect(deltas).toBe(text);
+    await car.say("다음", "c2", drive);
+    expect(llm.calls.at(-1)!.system).toContain("같이 드라이브하니까 기분 좋아.");
+    expect(llm.calls.at(-1)!.system).not.toContain("점심은 뭐 먹을까");
+    car.close();
+  });
+
+  test("parked: capped at 4 sentences; a shorter reply is untouched", async () => {
+    const llm = newLlm();
+    llm.replies = [long, "응, 좋아! 같이 가자."];
+    const car = await readyCar(llm);
+    expect(await car.say("점심 어때", "p1", park)).toBe("오늘 날씨 좋다. 같이 드라이브하니까 기분 좋아. 점심은 뭐 먹을까? 국밥도 좋고 떡볶이도 좋아.");
+    expect(await car.say("그래", "p2", park)).toBe("응, 좋아! 같이 가자.");
+    car.close();
+  });
+
+  test("mid-stream: the provider stalls after sentence 2, the server cuts the stream and ends the turn at once", async () => {
+    const car = await Car.connect(boot(newLlm(), false, undefined, { stallAfter: "첫 번째 문장이야. 두 번째 문장이야. 세 번째는", llmDeadlineMs: 2500 }));
+    await car.grantTalk();
+    const t0 = performance.now();
+    const text = await car.say("안녕", "m1", drive);
+    expect(text).toBe("첫 번째 문장이야. 두 번째 문장이야.");
+    expect(performance.now() - t0).toBeLessThan(2000);
+    expect(car.frames.some((f) => f.turnId === "m1" && f.type === "error")).toBe(false);
+    car.close();
+  });
+});
+
+describe("SentenceCap unit", () => {
+  test("counts ? ! … and newline ends, ignores dots inside a sentence", () => {
+    const cap = new SentenceCap(2);
+    expect(cap.take("그래 3.5km 가자.")).toEqual({ text: "그래 3.5km 가자.", done: false });
+    expect(cap.take("어때? 응!")).toEqual({ text: "어때?", done: true });
+    expect(cap.take("더 있어")).toEqual({ text: null, done: true });
+  });
+  test("a piece split mid-sentence (clause cut) does not count as a sentence", () => {
+    const cap = new SentenceCap(2);
+    expect(cap.take("비 오니까,")).toEqual({ text: "비 오니까,", done: false });
+    expect(cap.take("천천히 가자.")).toEqual({ text: "천천히 가자.", done: false });
+    expect(cap.take("좋아!")).toEqual({ text: "좋아!", done: true });
+  });
+});
 
 describe("LLM deadline (PLEOS-134)", () => {
   test("a stream that stalls after the first token ends the turn with error llm_failed and the next turn is accepted", async () => {

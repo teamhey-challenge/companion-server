@@ -57,7 +57,7 @@ async function runScenario(sc: TalkScenario, n: number): Promise<TurnRow[]> {
     fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
   const { carToken } = (await (await call("POST", "/v1/cars/register", { "x-provision-secret": SECRET }, { installId })).json()) as { carToken: string };
   const auth = { authorization: `Bearer ${carToken}` };
-  for (const type of ["record", "memory"]) await call("POST", "/v1/consents", auth, { type, version: "1", granted: true, channel: "car" });
+  for (const type of ["record", "external_ai", "memory"]) await call("POST", "/v1/consents", auth, { type, version: "1", granted: true, channel: "car" });
   await call("PATCH", "/v1/settings", auth, { speech: sc.speech });
   let t = Date.now() - 86_400_000;
   for (const text of sc.memories ?? []) side.query("INSERT INTO memory (id, install_id, kind, text, created_at) VALUES (?1, ?2, 'fact', ?3, ?4)").run(crypto.randomUUID(), installId, text, (t += 1000));

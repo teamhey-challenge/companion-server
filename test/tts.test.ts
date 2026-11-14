@@ -262,7 +262,7 @@ describe("server with TTS", () => {
     const { order, bytes } = await turn(new FakeTts(), two);
     expect(order[0]).toBe("start:pcm");
     expect(order.at(-1)).toBe("reply.end");
-    expect(bytes.length).toBe(9);
+    expect(bytes.length).toBe(6); // ctx 없음 = 주행: 3문장 중 앞 2문장만 말한다(PLEOS-125)
     expect(bytes.every((b) => b === 480)).toBe(true);
     expect(order.indexOf("bin")).toBeGreaterThan(0);
     expect(order.filter((o) => o === "reply.delta").length).toBeGreaterThan(0);

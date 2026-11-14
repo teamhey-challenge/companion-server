@@ -35,7 +35,7 @@ async function ask(c: EvalCase, n: number): Promise<{ text: string; ms: number }
     fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
   const { carToken } = (await (await call("POST", "/v1/cars/register", { "x-provision-secret": SECRET }, { installId })).json()) as { carToken: string };
   const auth = { authorization: `Bearer ${carToken}` };
-  for (const type of ["record", "memory"]) await call("POST", "/v1/consents", auth, { type, version: "1", granted: true, channel: "car" });
+  for (const type of ["record", "external_ai", "memory"]) await call("POST", "/v1/consents", auth, { type, version: "1", granted: true, channel: "car" });
   await call("PATCH", "/v1/settings", auth, { speech: c.speech });
   const { wsTicket } = (await (await call("POST", "/v1/sessions", auth)).json()) as { wsTicket: string };
   const ws = new WebSocket(`ws://127.0.0.1:${server.port}/v1/talk?ticket=${wsTicket}`);
