@@ -127,7 +127,7 @@ const drive = { gear: "D", speedKmh: 40, naviGuiding: false };
 describe("LLM deadline (PLEOS-134)", () => {
   test("a stream that stalls after the first token ends the turn with error llm_failed and the next turn is accepted", async () => {
     const car = await Car.connect(boot(newLlm(), false, undefined, { llmDeadlineMs: 150, stall: true }));
-    await car.consent("record");
+    await car.grantTalk();
     await car.consent("memory");
     await car.say("오늘 날씨 어때?", "d1");
     expect(car.frames.find((f) => f.turnId === "d1" && f.type === "error")?.code).toBe("llm_failed");
