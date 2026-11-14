@@ -224,6 +224,7 @@ describe("server with TTS", () => {
     const base = `http://127.0.0.1:${s.port}`;
     const j = { "content-type": "application/json" };
     const { carToken } = (await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j, "X-Provision-Secret": "p" }, body: JSON.stringify({ installId: "install-0001" }) })).json()) as { carToken: string };
+    for (const type of ["record", "external_ai"]) await fetch(`${base}/v1/consents`, { method: "POST", headers: { ...j, Authorization: `Bearer ${carToken}` }, body: JSON.stringify({ type, version: "1", granted: true, channel: "car" }) });
     const { wsTicket } = (await (await fetch(`${base}/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${carToken}` } })).json()) as { wsTicket: string };
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/v1/talk?ticket=${wsTicket}`);
     ws.binaryType = "arraybuffer";
@@ -326,6 +327,7 @@ describe("server with TTS", () => {
     const base = `http://127.0.0.1:${s.port}`;
     const j = { "content-type": "application/json" };
     const reg: { carToken: string } = await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j, "X-Provision-Secret": "p" }, body: JSON.stringify({ installId: "install-0002" }) })).json();
+    for (const type of ["record", "external_ai"]) await fetch(`${base}/v1/consents`, { method: "POST", headers: { ...j, Authorization: `Bearer ${reg.carToken}` }, body: JSON.stringify({ type, version: "1", granted: true, channel: "car" }) });
     const ses: { wsTicket: string } = await (await fetch(`${base}/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${reg.carToken}` } })).json();
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/v1/talk?ticket=${ses.wsTicket}`);
     ws.binaryType = "arraybuffer";
