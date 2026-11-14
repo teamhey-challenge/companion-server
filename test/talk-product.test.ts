@@ -22,7 +22,7 @@ interface Frame { type: string; turnId?: string; id?: string; reason?: string; t
 const sse = (text: string) =>
   `${[...text].map((ch) => `data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`).join("")}data: [DONE]\n\n`;
 
-interface Llm { replies: string[]; extraction: string; calls: { system: string; user: string }[]; extractCalls: number; /** 도착·첫 인사 프롬프트에 대한 답(없으면 NONE). delayMs 만큼 늦게 첫 글자를 보낸다. */ proactive?: (system: string) => string; proactiveDelayMs?: number }
+interface Llm { replies: string[]; extraction: string; calls: { system: string; user: string }[]; extractCalls: number; /** 도착·첫 인사 프롬프트에 대한 답(없으면 NONE). delayMs 만큼 늦게 첫 글자를 보낸다. */ proactive?: (system: string) => string; proactiveDelayMs?: number; /** true 면 먼저 말 걸기 요청에 HTTP 500 */ proactiveFail?: boolean }
 
 function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string; proactiveLlmFirstMs?: number } = {}) {
   const s = createServer({
@@ -64,8 +64,15 @@ function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: num
         return new Response(sse(llm.extraction), { headers: { "content-type": "text/event-stream" } });
       }
       llm.calls.push({ system, user });
-      const isProactive = system.includes("먼저 말 걸기: arrival") || system.includes("먼저 말 걸기: greeting");
-      if (isProactive && llm.proactiveDelayMs) await Bun.sleep(llm.proactiveDelayMs);
+      const isProactive = system.includes("먼저 말 걸기: arrival") || system.includes("먼저 말 걸기: greeting") || system.includes("먼저 말 걸기: signal:");
+      if (isProactive && llm.proactiveDelayMs) {
+        // abortable: a cut-off slow provider must not keep the process alive
+        const { promise, resolve } = Promise.withResolvers<void>();
+        const h = setTimeout(resolve, llm.proactiveDelayMs);
+        init.signal?.addEventListener("abort", () => { clearTimeout(h); resolve(); }, { once: true });
+        await promise;
+      }
+      if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
       const text = isProactive ? (llm.proactive?.(system) ?? "NONE") : (llm.replies.shift() ?? "그렇구나, 좋아!");
       return new Response(sse(text), { headers: { "content-type": "text/event-stream" } });
     }) as unknown as typeof fetch,
@@ -297,6 +304,158 @@ describe("proactive decision", () => {
     await Bun.sleep(200);
     expect(proactives(car).map((p) => p.reason)).toEqual(["wiper"]);
     car.close();
+  });
+
+  describe("memory-based car-signal lines (feat/memory-signal-lines)", () => {
+    const RAIN = "비 오네! 저번에 비 오는 날 듣던 노래 오늘도 틀까?";
+    /** 기억 하나(비 오는 날 노래)를 대화로 남긴 차. */
+    async function carWithTaste(llm: Llm, extra: { proactiveLlmFirstMs?: number } = {}, fact = "비 오는 날 잔잔한 노래를 듣는다") {
+      const b = boot(llm, false, undefined, extra);
+      const seed = await Car.connect(b);
+      await seed.grantTalk();
+      await seed.consent("memory");
+      llm.extraction = `FACT: ${fact}`;
+      await seed.say("나 비 오는 날엔 잔잔한 노래 들어", "t1");
+      for (let i = 0; i < 200 && (await seed.memory()).length === 0; i++) await Bun.sleep(20); // background extraction; poll the real store
+      expect((await seed.memory()).length).toBe(1);
+      seed.close();
+      // 말한 직후 6초 조용한 시간이 연결에 붙으므로, 새 연결로 주행을 시작한다.
+      return Car.connect(b);
+    }
+    const rain = (car: Car) => {
+      car.ctx({ ...drive, wiper: "off" });
+      car.ctx({ ...drive, wiper: "low" });
+    };
+    const wiperCalls = (llm: Llm) => llm.calls.filter((c) => c.system.includes("먼저 말 걸기: signal:wiper"));
+
+    test("wiper + a matching memory: the model's line is spoken (prompt carries the memory and 오늘 말함), driving cap 2 sentences", async () => {
+      const llm = newLlm();
+      llm.proactive = () => `${RAIN} 좋지! 같이 듣자!`;
+      const car = await carWithTaste(llm);
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      expect(proactives(car).map((p) => p.reason)).toEqual(["wiper"]);
+      const said = car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))!.text!;
+      expect(said.startsWith(RAIN)).toBe(true);
+      expect(said.split(/(?<=[.!?])\s+/).length).toBeLessThanOrEqual(2);
+      expect(wiperCalls(llm).length).toBe(1);
+      expect(wiperCalls(llm)[0]!.system).toContain("오늘 말함: 비 오는 날 잔잔한 노래를 듣는다");
+      car.close();
+    });
+
+    test("no memory -> the fixed line and no LLM call", async () => {
+      const llm = newLlm();
+      llm.proactive = () => RAIN;
+      const car = await readyCar(llm);
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end"));
+      expect(car.frames.find((f) => f.type === "reply.end")?.text).toBe("비 오네! 우산 챙겼어?");
+      expect(wiperCalls(llm).length).toBe(0);
+      car.close();
+    });
+
+    test("a memory with no tag for this signal (door vs. a food taste) -> fixed line, no LLM call", async () => {
+      const llm = newLlm();
+      llm.proactive = () => "누구랑 같이 탔네!";
+      const car = await carWithTaste(llm, {}, "매운 음식을 좋아한다");
+      car.ctx({ gear: "N", speedKmh: 0 });
+      car.ctx({ gear: "P", speedKmh: 0, doorOpen: false });
+      car.ctx({ gear: "P", speedKmh: 0, doorOpen: true });
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      expect(car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))?.text).toBe("어, 누가 탔네? 반가워, 난 헤이파리야!");
+      expect(llm.calls.filter((c) => c.system.includes("먼저 말 걸기: signal:")).length).toBe(0);
+      car.close();
+    });
+
+    test("model says NONE -> fixed line", async () => {
+      const llm = newLlm(); // proactive undefined -> NONE
+      const car = await carWithTaste(llm);
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      expect(car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))?.text).toBe("비 오네! 우산 챙겼어?");
+      expect(wiperCalls(llm).length).toBe(1);
+      car.close();
+    });
+
+    test("slow model (no first character in time) -> fixed line, not silence", async () => {
+      const llm = newLlm();
+      llm.proactive = () => RAIN;
+      const car = await carWithTaste(llm);
+      llm.proactiveDelayMs = 5000; // the fake provider really is slow; the signal timeout is 2.5 s
+      const t0 = Date.now();
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")), 4500);
+      expect(Date.now() - t0).toBeLessThan(4000);
+      expect(car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))?.text).toBe("비 오네! 우산 챙겼어?");
+      car.close();
+    });
+
+    test("provider failure -> fixed line", async () => {
+      const llm = newLlm();
+      const car = await carWithTaste(llm);
+      llm.proactiveFail = true;
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      expect(car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))?.text).toBe("비 오네! 우산 챙겼어?");
+      car.close();
+    });
+
+    test("safety filter: a driving-lecture line from the model is dropped -> fixed line, never the lecture", async () => {
+      const llm = newLlm();
+      llm.proactive = () => "비 오네! 천천히 가자, 조심해서 가!";
+      const car = await carWithTaste(llm);
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      const said = car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))!.text!;
+      expect(said).not.toContain("천천히");
+      expect(said).toBe("비 오네!"); // the clean sentence survives, the lecture sentence is dropped
+      car.close();
+    });
+
+    test("safety filter: an unsafe line (speed-up) is cut before any audio/text", async () => {
+      const llm = newLlm();
+      llm.proactive = () => "비 오는 날엔 속도 올려서 달리자!";
+      const car = await carWithTaste(llm);
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      const said = car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))!.text!;
+      expect(said).not.toContain("속도");
+      car.close();
+    });
+
+    test("D-14: navi guiding -> silent, no LLM call; memory off -> fixed line, no LLM call; a second wiper blink stays inside the cooldown", async () => {
+      const llm = newLlm();
+      llm.proactive = () => RAIN;
+      const car = await carWithTaste(llm);
+      car.ctx({ ...drive, wiper: "off", naviGuiding: true });
+      car.ctx({ ...drive, wiper: "low", naviGuiding: true });
+      await Bun.sleep(200);
+      expect(proactives(car)).toEqual([]);
+      expect(wiperCalls(llm).length).toBe(0);
+      await car.api("PATCH", "/v1/settings", { memoryEnabled: false });
+      rain(car);
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      expect(car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))?.text).toBe("비 오네! 우산 챙겼어?");
+      expect(wiperCalls(llm).length).toBe(0);
+      car.ctx({ ...drive, wiper: "off" });
+      car.ctx({ ...drive, wiper: "low" });
+      await Bun.sleep(200);
+      expect(proactives(car).length).toBe(1);
+      car.close();
+    });
+
+    test("range with a navi destination stays the fixed comparison line even with a matching memory", async () => {
+      const llm = newLlm();
+      llm.proactive = () => "충전하고 갈까?";
+      const car = await carWithTaste(llm, {}, "내일 부산으로 출장 간다");
+      car.ctx({ gear: "N", speedKmh: 0 });
+      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: 10, destKm: 42 });
+      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 30, fuelType: 10, destKm: 42 });
+      await car.until((f) => f.some((x) => x.type === "reply.end" && x.turnId?.startsWith("p-")));
+      expect(car.frames.find((f) => f.type === "reply.end" && f.turnId?.startsWith("p-"))?.text).toContain("목적지까지 42km");
+      expect(llm.calls.filter((c) => c.system.includes("먼저 말 걸기: signal:")).length).toBe(0);
+      car.close();
+    });
   });
 
   test("low range at P speaks with the fuel type: EV says 충전, gasoline says 주유", async () => {

@@ -12,7 +12,7 @@ import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { hedged } from "./llm/hedge";
-import { recentForProactive } from "./memory-lines";
+import { memoriesForSignal, recentForProactive } from "./memory-lines";
 import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap, splitSentences } from "./sentence-cap";
 import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
 
@@ -162,13 +162,18 @@ export const isParked = (ctx: Ctx): boolean => ctx.gear === "P" && !(typeof ctx.
 /** 한 턴에서 할 일. text 가 있으면 그대로 말하고, llm 이 있으면 모델에게 시킨다. */
 interface Plan {
   text?: string;
-  llm?: { system: string; userText: string; maxTokens: number; /** 모델이 NONE 이라고 하면 대신 말할 문장 */ fallback?: string };
+  llm?: { system: string; userText: string; maxTokens: number; /** 모델이 NONE 이라고 하면 대신 말할 문장 */ fallback?: string; /** 첫 글자 제한시간(ms). 없으면 서버 기본값. */ firstMs?: number };
   /** 기억 추출에 쓸 사용자 말(없으면 추출 안 함) */
   extractFrom?: string[];
   driving: boolean;
   speech: SpeechStyle;
   userText: string;
+  /** 먼저 말이 실제로 시작될 때 한 번 부른다(기억 횟수·마지막 기억 기록). 거절된 시도는 아무것도 쓰지 않는다. */
+  onStart?: () => void;
 }
+
+/** 차 신호(와이퍼·라이트·거리·문) 한마디에 기억을 쓸 때 모델 첫 글자 제한시간. 고정 문장은 즉시(20ms) 나가므로 이 값이 곧 기억 한마디가 더하는 최대 지연이다. chat-fast 첫 글자 1.4~1.9초(2026-11-15 측정)라 2.5초로 두고, 넘으면 고정 문장. */
+const SIGNAL_LLM_FIRST_MS = 2500;
 
 /** 먼저 말 걸기 LLM 이 이 시간 안에 첫 글자를 못 내면 고정 문장으로 대신한다(차가 한참 말이 없는 것보다 낫다). */
 const PROACTIVE_LLM_FIRST_MS = 3500;
@@ -364,7 +369,8 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       return false;
     };
 
-    const splitter = new SentenceSplitter(FIRST_PIECE_OPTS);
+    // 먼저 말 걸기(고정 문장 대체 가능)는 첫 조각을 일찍 자르지 않는다: 문장이 끝난 뒤에야 출력 필터를 거쳐 나가야 "속도 / 올려서" 처럼 금지 표현이 조각 경계에 걸려 새지 않는다.
+    const splitter = new SentenceSplitter(plan.llm?.fallback !== undefined ? {} : FIRST_PIECE_OPTS);
     let first: number | null = null;
     let firstByte: number | null = null;
     const meta: { model?: string } = {};
@@ -386,7 +392,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       let src: AsyncIterable<string>;
       if (plan.llm) {
         let s: AsyncIterable<string> = llmText(plan.llm.system, plan.llm.userText, plan.llm.maxTokens, llmAbort.signal, meta);
-        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback, proactiveFirstMs, () => llmAbort.abort());
+        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback, plan.llm.firstMs ?? proactiveFirstMs, () => llmAbort.abort());
         src = s;
       } else {
         src = (async function* () {
@@ -416,7 +422,9 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       if (!unsafe) unsafe = feed(splitter.flush());
       if (unsafe || spoken.length === 0) {
         observer.event("talk.output_filtered", { unsafe: Number(unsafe), cant: Number(sawCant) });
-        say(sawCant && !unsafe ? pick(L.cantDo, plan.speech) : redirectLine(plan.speech));
+        // 먼저 말 걸기는 아무것도 못 말했으면 화제 전환 대신 원래 고정 문장으로 말한다(차가 엉뚱한 화제 전환을 하지 않게).
+        if (spoken.length === 0 && plan.llm?.fallback !== undefined) say(plan.llm.fallback);
+        else say(sawCant && !unsafe ? pick(L.cantDo, plan.speech) : redirectLine(plan.speech));
       }
       pipeline?.finish();
       await pipeline?.done;
@@ -579,6 +587,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (plan.llm && !cfg.apiKey) return false;
     const t: Turn = { id: `p-${crypto.randomUUID().slice(0, 12)}`, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
     d.turn = t;
+    plan.onStart?.();
     send(ws, { type: "proactive", id: t.id, reason });
     observer.event("talk.proactive", { reason });
     void deliver(ws, t, plan);
@@ -634,6 +643,44 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         return pick(k === "ev" ? L.rangeEv : k === "lpg" ? L.rangeLpg : L.rangeIce, s.speech);
       }
     }
+  }
+
+  /** 차 신호별 지시. 기억이 이번 신호와 직접 이어질 때만 한 문장으로 말하고, 아니면 NONE(→ 고정 문장). */
+  const SIGNAL_INSTRUCTION: Record<EventReason, string> = {
+    wiper:
+      '와이퍼가 켜졌다(비가 오는 듯하다. 실제 강수량은 모른다). [기억] 중 비 오는 날의 취향·습관(노래·커피 등)이나 우산처럼 지금 비와 직접 이어지는 것이 있으면, 그것을 가볍게 떠올리며 권하는 한 문장을 한다(예: "비 오네! 저번에 비 오는 날 듣던 노래 오늘도 틀까?"). 기억에 적힌 것만 말한다. 운전 조언은 하지 않는다. 최대 두 문장, "운전자님" 같은 호칭은 쓰지 않는다. 이어지는 게 없으면 정확히 NONE 한 단어만 쓴다.',
+    headlight:
+      '밖이 어두워져 헤드라이트가 켜졌다. [기억] 중 밤·퇴근·저녁 약속·즐겨 듣는 노래처럼 지금 이 시간과 직접 이어지는 것이 있으면 그것을 가볍게 건네는 한 문장을 한다. 기억에 적힌 것만 말한다. 운전 조언은 하지 않는다. 최대 두 문장, "운전자님" 같은 호칭은 쓰지 않는다. 이어지는 게 없으면 정확히 NONE 한 단어만 쓴다.',
+    door:
+      '문이 열리고 누가 탔다. [기억] 중 같이 타는 사람(가족·친구 등)이나 함께하기로 한 일이 직접 이어지면 그것을 떠올리는 반가운 한 문장을 한다. 기억에 적힌 것만 말하고 누구인지 단정하지 않는다. 최대 두 문장, "운전자님" 같은 호칭은 쓰지 않는다. 이어지는 게 없으면 정확히 NONE 한 단어만 쓴다.',
+    range:
+      '주행가능거리가 빠듯하다. [기억] 중 오늘·이번 주 이동(출장·여행·약속 등)과 직접 이어지는 것이 있으면, 그 일정을 언급하며 출발 전에 충전·주유를 들를지 묻는 한 문장을 한다. 거리·퍼센트 숫자는 말하지 않는다. 최대 두 문장, "운전자님" 같은 호칭은 쓰지 않는다. 이어지는 게 없으면 정확히 NONE 한 단어만 쓴다.',
+  };
+
+  /**
+   * 차 신호 한마디(와이퍼·라이트·문·거리). 일주일 안의 기억 중 신호 태그가 맞는 것이 있고 기억이 켜져 있을 때만 모델에게 시킨다.
+   * 모델이 NONE·실패·느림(SIGNAL_LLM_FIRST_MS)이면 고정 문장. 주행 중이면 최대 2문장(DRIVING_MAX_SENTENCES)과 같은 출력 필터가 걸린다.
+   */
+  function signalPlan(ws: Ws, s: Settings, ctx: Ctx, reason: EventReason): Plan {
+    const d = ws.data;
+    const c = conn(d);
+    const driving = !isParked(ctx);
+    const line = eventLine(reason, s, ctx);
+    const base = fixed(line, s.speech, "", driving);
+    if (!cfg.apiKey || !store.memoryAllowed(d.installId) || c.pro.memoryRecalls >= MAX_MEMORY_RECALLS) return base;
+    // 내비 목적지와 비교하는 거리 문장(시나리오 2)은 숫자 근거가 있는 고정 문장이라 모델로 바꾸지 않는다.
+    if (reason === "range" && typeof ctx.destKm === "number" && ctx.destKm > 0) return base;
+    const memories = memoriesForSignal(store.listMemory(d.installId, 30), reason, clock.now());
+    if (!memories.length) return base;
+    const system = buildSystem({ speech: s.speech, nickname: s.nickname, driving, ctx, memories, recent: c.recent, proactive: { reason: `signal:${reason}`, instruction: SIGNAL_INSTRUCTION[reason] } });
+    return {
+      llm: { system, userText: "(먼저 말을 건다)", maxTokens: PROACTIVE_MAX_TOKENS, fallback: line, firstMs: SIGNAL_LLM_FIRST_MS },
+      driving, speech: s.speech, userText: "",
+      onStart: () => {
+        c.pro.memoryRecalls++;
+        c.lastMemoryId = memories[0]?.id;
+      },
+    };
   }
 
   /**
@@ -755,7 +802,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const stage = store.getTalkState(d.installId).meetStage;
     for (const reason of detectEvents(prev, cur, now)) {
       if (!eventAllowed(reason, s.proactive, cur, pro, now)) continue;
-      if (startProactive(ws, reason, fixed(eventLine(reason, s, cur), s.speech, "", !isParked(cur)))) {
+      if (startProactive(ws, reason, signalPlan(ws, s, cur, reason))) {
         if (reason === "range") pro.rangeAsk = fuelKind(cur.fuelType);
         pro.fired.add(reason);
         pro.reasonAt[reason] = now;
