@@ -135,6 +135,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   if (consent && m === "DELETE") {
     if (!(CONSENT_TYPES as readonly string[]).includes(consent[1]!)) return bad();
     d.api.withdrawConsent(installId, consent[1] as ConsentType);
+    d.consentChanged?.(installId);
     return noContent();
   }
 

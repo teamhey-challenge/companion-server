@@ -356,6 +356,48 @@ describe("memory", () => {
 });
 
 describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
+  test("withdrawing external_ai cancels the in-flight turn at once (PLEOS-135)", async () => {
+    const car = await Car.connect(boot(newLlm(), false, undefined, { llmDeadlineMs: 60_000, stall: true }));
+    await car.grantTalk();
+    car.send({ type: "turn.start", turnId: "w1", trigger: "ptt" });
+    car.send({ type: "ctx", turnId: "w1", ctx: { gear: "P", speedKmh: 0 } });
+    car.send({ type: "text", turnId: "w1", text: "오늘 날씨 어때?" });
+    car.send({ type: "turn.end", turnId: "w1" });
+    await car.until((f) => f.some((x) => x.type === "reply.start" && x.turnId === "w1")); // the stalled stream has started
+    expect((await car.api("DELETE", "/v1/consents/external_ai")).status).toBe(204);
+    await car.until((f) => f.some((x) => x.turnId === "w1" && x.type === "error"));
+    expect(car.frames.find((x) => x.turnId === "w1" && x.type === "error")?.code).toBe("consent_required");
+    car.close();
+  });
+
+  test("withdrawing record clears the pending arrival timer: it never speaks (PLEOS-135)", async () => {
+    const real = new SystemClock();
+    const pending = new Map<number, () => void>();
+    let next = 1;
+    const clock: Clock = {
+      now: () => real.now(),
+      // 도착 타이머만 손으로 돌린다(다른 타이머는 실제로 돈다).
+      setTimeout: (f, ms) => {
+        if (ms !== 30) return real.setTimeout(f, ms);
+        pending.set(next, f);
+        return { id: next++ };
+      },
+      clearTimeout: (h) => {
+        if (pending.has(h.id)) pending.delete(h.id);
+        else real.clearTimeout(h);
+      },
+    };
+    const car = await Car.connect(boot(newLlm(), true, clock));
+    await car.grantTalk();
+    car.ctx({ gear: "D", speedKmh: 40 });
+    car.ctx({ gear: "P", speedKmh: 0 });
+    for (let i = 0; i < 100 && pending.size === 0; i++) await Bun.sleep(10);
+    expect(pending.size).toBe(1); // arrival timer armed
+    expect((await car.api("DELETE", "/v1/consents/record")).status).toBe(204);
+    expect(pending.size).toBe(0); // cleared by the withdrawal
+    car.close();
+  });
+
   test("baseline P before C1: the first-meeting question comes once both consents arrive on the live socket", async () => {
     const car = await Car.connect(boot(newLlm()));
     car.ctx({ gear: "P", speedKmh: 0 });
