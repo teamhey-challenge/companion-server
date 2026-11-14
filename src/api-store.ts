@@ -71,14 +71,16 @@ export class ApiStore {
     return rows.map((r) => ({ type: r.type, version: r.version, granted: r.granted === 1, at: iso(r.at) }));
   }
 
-  /** record·memory 철회는 그 차의 기억과 요약을 바로 지운다. memory 철회는 기억 기능도 끈다. */
+  /** record·memory 철회는 그 차의 기억과 요약을 바로 지운다. memory 철회는 기억 기능도 끄고, memory 동의가 철회·없음에서 새로 허용되면 켠다. 이미 허용된 상태의 반복 허용은 설정 토글을 건드리지 않는다. */
   setConsent(installId: string, type: ConsentType, version: string, granted: boolean): void {
+    const wasGranted = this.consentGranted(installId, type) === true;
     this.db
       .query(
         `INSERT INTO consents (install_id, type, version, granted, at) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(install_id, type) DO UPDATE SET version = ?3, granted = ?4, at = ?5`,
       )
       .run(installId, type, version, granted ? 1 : 0, this.clock.now());
+    if (granted && type === "memory" && !wasGranted) this.patchSettings(installId, { memoryEnabled: true });
     if (!granted && (type === "record" || type === "memory")) {
       this.deleteAllMemory(installId);
       if (type === "memory") this.patchSettings(installId, { memoryEnabled: false });

@@ -200,6 +200,39 @@ test("settings PATCH pushes to the hub and validates input", async () => {
   expect(pushed.length).toBe(1);
 });
 
+test("memory consent drives settings.memoryEnabled (PLEOS-129)", async () => {
+  const { call, car, pair } = boot();
+  const a = await car("install-aaaa1");
+  const enabled = async (tok: string) => {
+    const s: { memoryEnabled: boolean } = await (await call("GET", "/v1/settings", tok)).json();
+    return s.memoryEnabled;
+  };
+  // 폰 claim memory=false → 꺼짐, 이후 폰이 memory 동의를 켜면 켜짐
+  const p = await pair(a, false);
+  expect(await enabled(a)).toBe(false);
+  const grant = (tok: string, channel: string) => call("POST", "/v1/consents", tok, { type: "memory", version: "v1", granted: true, channel });
+  expect((await grant(p.phoneToken, "phone")).status).toBe(200);
+  expect(await enabled(a)).toBe(true);
+  // 동의 철회 → 꺼짐
+  expect((await call("DELETE", "/v1/consents/memory", a)).status).toBe(204);
+  expect(await enabled(a)).toBe(false);
+  // 재동의 → 켜짐
+  expect((await grant(a, "car")).status).toBe(200);
+  expect(await enabled(a)).toBe(true);
+  // 사용자가 설정에서 끔 → 같은 동의를 다시 보내도 꺼진 채 유지
+  expect((await call("PATCH", "/v1/settings", a, { memoryEnabled: false })).status).toBe(200);
+  expect((await grant(a, "car")).status).toBe(200);
+  expect(await enabled(a)).toBe(false);
+  // 철회 후 재동의하면 다시 켜짐
+  await call("DELETE", "/v1/consents/memory", a);
+  await grant(a, "car");
+  expect(await enabled(a)).toBe(true);
+  // 새 차에서 폰 claim memory=true → 켜짐
+  const b = await car("install-bbbb1");
+  await pair(b, true);
+  expect(await enabled(b)).toBe(true);
+});
+
 test("vehicle events: 202 and coordinate keys dropped", async () => {
   const { call, car, dbPath } = boot();
   const a = await car("install-aaaa1");
