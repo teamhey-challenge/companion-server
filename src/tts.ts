@@ -172,15 +172,33 @@ export class Semaphore {
 const MIN_SENTENCE_CHARS = 6;
 const END = /[.!?。！？…]+["'”’)\]」』]*(?=\s|$)|\n+/g;
 
-/** LLM 델타를 모아 문장이 끝날 때마다 내보낸다. 너무 짧은 조각은 다음 문장과 합친다. */
+/**
+ * LLM 델타를 모아 문장이 끝날 때마다 내보낸다. 너무 짧은 조각은 다음 문장과 합친다.
+ * firstClauseMin 을 주면 첫 조각만 쉼표에서도 끊는다(그 글자 수 이상일 때): 첫 소리를 문장 끝까지 기다리지 않으려는 것이다.
+ */
 export class SentenceSplitter {
   private buf = "";
+  private emitted = 0;
+
+  constructor(private readonly opts: { firstClauseMin?: number } = {}) {}
 
   push(delta: string): string[] {
     this.buf += delta;
     const out: string[] = [];
     let start = 0;
-    END.lastIndex = 0;
+    const min = this.opts.firstClauseMin;
+    if (min !== undefined && this.emitted === 0) {
+      const comma = /[,，、]/.exec(this.buf);
+      if (comma) {
+        const end = comma.index + 1;
+        const piece = this.buf.slice(0, end).trim();
+        if (piece.length >= min && !/[.!?。！？…\n]/.test(piece)) {
+          out.push(piece);
+          start = end;
+        }
+      }
+    }
+    END.lastIndex = start;
     for (let m = END.exec(this.buf); m; m = END.exec(this.buf)) {
       const end = m.index + m[0].length;
       const piece = this.buf.slice(start, end).trim();
@@ -190,6 +208,7 @@ export class SentenceSplitter {
       }
     }
     this.buf = this.buf.slice(start);
+    this.emitted += out.length;
     return out;
   }
 

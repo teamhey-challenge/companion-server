@@ -6,7 +6,7 @@ import { SystemClock, type Clock } from "./clock";
 import type { Observability } from "./observe";
 import { RateLimiter } from "./rate-limit";
 import { CarStore, TicketBook } from "./store";
-import { talkHandlers, type TalkConfig, type WsData } from "./talk";
+import { TalkHub, talkHandlers, type TalkConfig, type WsData } from "./talk";
 import type { TtsProvider } from "./tts";
 
 export type RunningServer = Bun.Server<WsData>;
@@ -27,6 +27,8 @@ export interface ServerOptions {
   hub?: { pushSettings(installId: string, settings: Settings): void };
   /** 토큰 없는 공개 경로(코드 조회·claim)의 IP별 분당 한도. */
   publicPerMin?: number;
+  /** 도착 인사까지의 시간(F10, 기본 3초). 시험에서만 바꾼다. */
+  arrivalDelayMs?: number;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -42,6 +44,7 @@ export function createServer(o: ServerOptions): RunningServer {
   const cars = new CarStore(o.dbPath, clock);
   const api = new ApiStore(cars.db, clock);
   const tickets = new TicketBook(clock);
+  const talkHub = new TalkHub();
 
   const throttled = (ip: string, bucket: string, max: number) => {
     try {
@@ -101,7 +104,10 @@ export function createServer(o: ServerOptions): RunningServer {
       const apiRes = await handleApi(req, url, ip, {
         api,
         cars,
-        pushSettings: o.hub ? (id, s) => o.hub!.pushSettings(id, s) : undefined,
+        pushSettings: (id, s) => {
+          talkHub.pushSettings(id, s);
+          o.hub?.pushSettings(id, s);
+        },
         throttled,
         publicPerMin: o.publicPerMin ?? 20,
         reject: (r) => o.observer.reject(r),
@@ -119,7 +125,7 @@ export function createServer(o: ServerOptions): RunningServer {
       if (srv.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     },
-    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts }), maxPayloadLength: 4 * 1024 },
+    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs }), maxPayloadLength: 4 * 1024 },
   });
   const stop = server.stop.bind(server);
   server.stop = (force?: boolean) => {
