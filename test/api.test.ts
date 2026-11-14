@@ -24,11 +24,12 @@ interface MemPage { items: { id: string; kind: string; text: string }[]; nextCur
 function boot(publicPerMin = 100) {
   const clock = new FakeClock();
   const pushed: [string, unknown][] = [];
+  const pairingPushed: [string, string][] = [];
   const dbPath = `${mkdtempSync(`${tmpdir()}/api-`)}/c.db`;
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath, clock, publicPerMin,
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 1000 },
-    hub: { pushSettings: (id, st) => pushed.push([id, st]) },
+    hub: { pushSettings: (id, st) => pushed.push([id, st]), pushPairing: (id, st) => pairingPushed.push([id, st]) },
   });
   servers.push(s);
   const base = `http://127.0.0.1:${s.port}`;
@@ -63,7 +64,7 @@ function boot(publicPerMin = 100) {
   };
   const memory = async (token: string): Promise<MemPage> => (await call("GET", "/v1/memory?limit=100", token)).json();
   const current = async (token: string): Promise<Pairing> => (await call("GET", "/v1/pairings/current", token)).json();
-  return { clock, call, car, newCode, pair, pushed, seedMemory, memory, current, dbPath };
+  return { clock, call, car, newCode, pair, pushed, pairingPushed, seedMemory, memory, current, dbPath };
 }
 
 test("phone token sees only its paired car; scope limits", async () => {
@@ -197,6 +198,21 @@ test("phone token can unpair itself only: car goes to none, token 401, memory ke
   expect((await call("GET", "/v1/settings", pb.phoneToken)).status).toBe(200);
   expect((await call("DELETE", "/v1/pairings/current", b)).status).toBe(204);
   expect((await call("GET", "/v1/settings", pb.phoneToken)).status).toBe(401);
+});
+
+test("unpair by phone or car pushes a pairing(none) frame for that car only (PLEOS-158)", async () => {
+  const { call, car, pair, pairingPushed } = boot();
+  const a = await car("install-aaaa1");
+  const b = await car("install-bbbb1");
+  const pa = await pair(a);
+  const pb = await pair(b);
+  expect((await call("DELETE", "/v1/pairings/current", pa.phoneToken)).status).toBe(204);
+  expect(pairingPushed).toEqual([["install-aaaa1", "none"]]);
+  expect((await call("DELETE", "/v1/pairings/current", b)).status).toBe(204);
+  expect(pairingPushed).toEqual([["install-aaaa1", "none"], ["install-bbbb1", "none"]]);
+  // a rejected call (token already revoked) pushes nothing
+  expect((await call("DELETE", "/v1/pairings/current", pb.phoneToken)).status).toBe(401);
+  expect(pairingPushed.length).toBe(2);
 });
 
 test("re-pair with the memory box unchecked keeps memory and F2 state, only future consent changes (PLEOS-136)", async () => {

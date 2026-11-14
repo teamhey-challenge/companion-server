@@ -1,4 +1,4 @@
-import { parseClientFrame, MAX_TEXT_CHARS, type AudioSpec, type Ctx, type ErrorCode, type ServerFrame, type Settings, type SpeechStyle, type Trigger } from "../shared/packages/protocol/src/index";
+import { parseClientFrame, MAX_TEXT_CHARS, type AudioSpec, type Ctx, type ErrorCode, type PairingStatus, type ServerFrame, type Settings, type SpeechStyle, type Trigger } from "../shared/packages/protocol/src/index";
 import type { GuardConfig } from "./auth";
 import { SystemClock, type Clock, type TimerHandle } from "./clock";
 import { answerChat, answerNickname, answerSpeech, bestMatch, parseExtraction, parseForget, parseNicknameRequest, parseSpeechChange, recall, snippet } from "./intents";
@@ -112,6 +112,10 @@ export class TalkHub {
   }
   pushSettings(installId: string, settings: Settings): void {
     const msg = JSON.stringify({ type: "settings", settings } satisfies ServerFrame);
+    for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
+  }
+  pushPairing(installId: string, status: PairingStatus): void {
+    const msg = JSON.stringify({ type: "pairing", status } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
   }
   /** talkHandlers 가 건다: 동의가 바뀔 때마다 그 차의 각 소켓에 부른다(withdrawn: 철회인가). */

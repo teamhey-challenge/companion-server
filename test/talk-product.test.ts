@@ -17,7 +17,7 @@ afterEach(() => {
   servers = [];
 });
 
-interface Frame { type: string; turnId?: string; id?: string; reason?: string; text?: string; settings?: { speech: string }; code?: string }
+interface Frame { type: string; turnId?: string; id?: string; reason?: string; text?: string; settings?: { speech: string }; status?: string; code?: string }
 
 const sse = (text: string) =>
   `${[...text].map((ch) => `data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`).join("")}data: [DONE]\n\n`;
@@ -384,6 +384,18 @@ describe("proactive decision", () => {
     const car = await readyCar(newLlm());
     await car.say("존댓말 써 줘", "s1");
     await car.until((f) => f.some((x) => x.type === "settings" && x.settings?.speech === "jondaetmal"));
+    car.close();
+  });
+
+  test("PLEOS-158: a phone unpair pushes a pairing(none) frame to the car's open socket", async () => {
+    const car = await readyCar(newLlm());
+    const { pairCode } = (await (await car.api("POST", "/v1/pairings")).json()) as { pairCode: string };
+    const claim = await fetch(`${car.base}/v1/pairings/${pairCode}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ record: true, memory: true }) });
+    const { phoneToken } = (await claim.json()) as { phoneToken: string };
+    expect(car.frames.some((f) => f.type === "pairing")).toBe(false);
+    const del = await fetch(`${car.base}/v1/pairings/current`, { method: "DELETE", headers: { authorization: `Bearer ${phoneToken}` } });
+    expect(del.status).toBe(204);
+    await car.until((f) => f.some((x) => x.type === "pairing" && x.status === "none"));
     car.close();
   });
 });

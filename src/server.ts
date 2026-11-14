@@ -1,4 +1,4 @@
-import type { RegisterResponse, SessionResponse, Settings } from "../shared/packages/protocol/src/index";
+import type { PairingStatus, RegisterResponse, SessionResponse, Settings } from "../shared/packages/protocol/src/index";
 import { handleApi } from "./api";
 import { ApiStore } from "./api-store";
 import { bearer, clientIp, isLocalRequest, safeEqual, type GuardConfig } from "./auth";
@@ -24,7 +24,7 @@ export interface ServerOptions {
   tts?: TtsProvider | null;
   clock?: Clock;
   /** ServerTalk 허브: 설정이 바뀌면 그 차의 열린 소켓에 settings 프레임을 보낸다. */
-  hub?: { pushSettings(installId: string, settings: Settings): void };
+  hub?: { pushSettings(installId: string, settings: Settings): void; pushPairing?(installId: string, status: PairingStatus): void };
   /** 토큰 없는 공개 경로(코드 조회·claim)의 IP별 분당 한도. */
   publicPerMin?: number;
   /** 도착 인사까지의 시간(F10, 기본 3초). 시험에서만 바꾼다. */
@@ -109,6 +109,10 @@ export function createServer(o: ServerOptions): RunningServer {
         pushSettings: (id, s) => {
           talkHub.pushSettings(id, s);
           o.hub?.pushSettings(id, s);
+        },
+        pushPairing: (id, st) => {
+          talkHub.pushPairing(id, st);
+          o.hub?.pushPairing?.(id, st);
         },
         consentChanged: (id, withdrawn) => talkHub.consentChanged(id, withdrawn),
         throttled,
