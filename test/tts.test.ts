@@ -48,6 +48,19 @@ describe("AudioPipeline", () => {
     expect(fake.calls.length).toBe(4);
     expect(fake.maxActive).toBe(2);
   });
+  test("background priming leaves a slot for real turns and never exceeds the limit", async () => {
+    const fake = new FakeTts(8);
+    const gated = new GatedTts(fake, new Semaphore(2), new Observability(() => {}));
+    const cache = new PhraseCache(gated, "v1");
+    const priming = cache.prime(["하나입니다.", "둘입니다요.", "셋입니다요.", "넷입니다요."]);
+    const real = [0, 1].map(async () => {
+      for await (const _ of await cache.synth("실제 답 문장입니다.", new AbortController().signal)) void _;
+    });
+    await Promise.all(real);
+    await priming;
+    expect(fake.maxActive).toBe(2);
+    expect(cache.size.entries).toBe(4);
+  });
   test("gate keeps generations at 2 and logs queue wait", async () => {
     const lines: string[] = [];
     const fake = new FakeTts(5);

@@ -2,7 +2,7 @@ import { loadGuardConfig } from "./auth";
 import { Observability } from "./observe";
 import { installProcessGuards, makeLogWriter } from "./process-guard";
 import { createServer } from "./server";
-import { fixedPieces } from "./lines";
+import { L, fixedPieces } from "./lines";
 import { loadTalkConfig } from "./talk";
 import { loadTtsConfig, makeTts } from "./tts";
 
@@ -22,7 +22,7 @@ observer.event("server.start", { port: server.port ?? port, pid: process.pid, pr
 // 고정 문장은 한 번 합성해 메모리에만 둔다(D-10). 백그라운드로, 공급사 자리 하나씩. COMPANION_TTS_PRIME=0 이면 건너뛴다.
 if (tts && process.env.COMPANION_TTS_PRIME !== "0") {
   const pieces = fixedPieces();
-  void tts.prime(pieces).then((r) => observer.event("tts.primed", { pieces: pieces.length, done: r.done, failed: r.failed, entries: r.entries, bytes: r.bytes }));
+  void tts.prime(pieces, undefined, [L.thinking.banmal, L.thinking.jondaetmal]).then((r) => observer.event("tts.primed", { pieces: pieces.length, done: r.done, failed: r.failed, entries: r.entries, bytes: r.bytes }));
 }
 
 installProcessGuards({
