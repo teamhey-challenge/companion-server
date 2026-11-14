@@ -143,8 +143,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   if (path === "/v1/pairings/current") {
     if (m === "GET") return carOnly() ?? json(d.api.currentPairing(installId));
     if (m === "DELETE") {
-      const denied = carOnly();
-      if (denied) return denied;
+      // 차·폰 모두 가능. installId는 토큰에서 나온 값(폰은 phone_hash로 찾은 자기 차)이라 다른 차의 연결은 건드릴 수 없다.
       d.api.unpair(installId);
       return noContent();
     }

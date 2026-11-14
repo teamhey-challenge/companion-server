@@ -80,7 +80,7 @@ test("phone token sees only its paired car; scope limits", async () => {
   expect((await call("PATCH", "/v1/settings", pa.phoneToken, { proactive: "off" })).status).toBe(403);
   expect((await call("PATCH", "/v1/settings", pa.phoneToken, { speech: "jondaetmal" })).status).toBe(200);
   expect((await call("POST", "/v1/pairings", pa.phoneToken)).status).toBe(403);
-  expect((await call("DELETE", "/v1/pairings/current", pa.phoneToken)).status).toBe(403);
+  expect((await call("GET", "/v1/pairings/current", pa.phoneToken)).status).toBe(403);
   expect((await call("POST", "/v1/vehicle-events", pa.phoneToken, [])).status).toBe(403);
   expect((await call("GET", "/v1/settings")).status).toBe(401);
   expect((await call("GET", "/v1/settings", "nope")).status).toBe(401);
@@ -178,6 +178,25 @@ test("claim records consents; unpair kills phone token but keeps memory; re-pair
   expect((await call("DELETE", "/v1/pairings/current", a)).status).toBe(204);
   expect((await call("GET", "/v1/settings", second.phoneToken)).status).toBe(401);
   expect((await memory(a)).items.length).toBe(2);
+});
+
+test("phone token can unpair itself only: car goes to none, token 401, memory kept, other phone untouched", async () => {
+  const { call, car, pair, seedMemory, memory, current } = boot();
+  const a = await car("install-aaaa1");
+  const b = await car("install-bbbb1");
+  const pa = await pair(a);
+  const pb = await pair(b);
+  seedMemory("install-aaaa1", 2);
+  expect((await call("GET", "/v1/pairings/current", pa.phoneToken)).status).toBe(403);
+  expect((await call("DELETE", "/v1/pairings/current", pa.phoneToken)).status).toBe(204);
+  expect((await call("GET", "/v1/settings", pa.phoneToken)).status).toBe(401);
+  expect((await call("DELETE", "/v1/pairings/current", pa.phoneToken)).status).toBe(401);
+  expect((await current(a)).status).toBe("none");
+  expect((await memory(a)).items.length).toBe(2);
+  expect((await current(b)).status).toBe("claimed");
+  expect((await call("GET", "/v1/settings", pb.phoneToken)).status).toBe(200);
+  expect((await call("DELETE", "/v1/pairings/current", b)).status).toBe(204);
+  expect((await call("GET", "/v1/settings", pb.phoneToken)).status).toBe(401);
 });
 
 test("re-pair with the memory box unchecked keeps memory and F2 state, only future consent changes (PLEOS-136)", async () => {
