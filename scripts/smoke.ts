@@ -28,6 +28,10 @@ const installId = process.env.SMOKE_INSTALL_ID ?? `smoke-${crypto.randomUUID().s
 const reg = await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { [PROVISION_HEADER]: provision, "content-type": "application/json" }, body: JSON.stringify({ installId }) });
 if (!reg.ok) throw new Error(`register ${reg.status}`);
 const { carToken } = (await reg.json()) as RegisterResponse;
+// 동의 없이는 답하지 않는다(consent_required): 시험 차에 필요한 동의를 준다. memory 는 주지 않아 기억 추출 호출이 안 생긴다.
+for (const type of ["record", "external_ai"]) {
+  await fetch(`${base}/v1/consents`, { method: "POST", headers: { authorization: `Bearer ${carToken}`, "content-type": "application/json" }, body: JSON.stringify({ type, version: "1", granted: true, channel: "car" }) });
+}
 
 interface Measure { firstDeltaMs: number | null; firstAudioMs: number | null; totalMs: number; audioBytes: number; audio: string; reply: string }
 

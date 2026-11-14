@@ -32,6 +32,9 @@ export interface TurnTiming {
   firstAudioMs?: number | null;
   /** 채움말이 나갔다면 그 첫 바이트 시각 */
   fillerMs?: number | null;
+  /** 첫 조각(문장 또는 첫 쉼표/띄어쓰기 조각)이 TTS 로 넘어간 때와 그 글자 수. 이 값과 firstTtsByteMs 의 차이가 TTS 요청→첫 바이트(+대기)다. */
+  firstPieceMs?: number | null;
+  firstPieceChars?: number | null;
   totalMs: number;
   model: string;
 }
@@ -112,6 +115,8 @@ export class Observability implements RelayObserver {
       first_tts_byte_ms: t.firstTtsByteMs ?? -1,
       first_audio_ms: t.firstAudioMs ?? -1,
       filler_ms: t.fillerMs ?? -1,
+      first_piece_ms: t.firstPieceMs ?? -1,
+      first_piece_chars: t.firstPieceChars ?? -1,
       total_ms: t.totalMs,
       model: t.model,
     });

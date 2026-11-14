@@ -192,6 +192,19 @@ describe("BreezeTts", () => {
     await expect(again.synth("a", new AbortController().signal)).rejects.toMatchObject({ status: 404 });
   });
 
+  test("warm() opens the provider connection with a free GET (no synthesis, no credits)", async () => {
+    const seen: { url: string; method?: string; key: string }[] = [];
+    const { promise: called, resolve } = Promise.withResolvers<void>();
+    const f = (async (url: string, init: RequestInit) => {
+      seen.push({ url, method: init.method, key: (init.headers as Record<string, string>)["xi-api-key"] ?? "" });
+      resolve();
+      return Response.json({ models: [] });
+    }) as unknown as typeof fetch;
+    new BreezeTts(cfg, obs, f).warm();
+    await called;
+    expect(seen).toEqual([{ url: "https://api.breeze.blue/v1/models", method: undefined, key: "k" }]);
+  });
+
   test("non-2xx -> TtsError", async () => {
     const b = new BreezeTts(cfg, obs, (async () => new Response("no", { status: 402 })) as unknown as typeof fetch);
     await expect(b.synth("a", new AbortController().signal)).rejects.toMatchObject({ status: 402 });
