@@ -12,6 +12,8 @@ export const openaiCompatible: LlmProvider = {
     const body: Record<string, unknown> = { ...(spec.body as Record<string, unknown>), max_tokens: req.maxTokens, thinking: { type: "disabled" } };
     // 게이트웨이는 max_completion_tokens를 모를 수 있어 호환성이 넓은 max_tokens를 쓴다.
     delete body.max_completion_tokens;
+    // 추론 모델이 생각을 답 본문에 흘리거나 토큰을 다 써서 답이 잘리는 일을 막는다(안전 평가 2026-11-14: 62문장 중 6건). 짧은 대화에는 추론이 필요 없다.
+    body.thinking = { type: "disabled" };
     return { ...spec, url: `${req.baseUrl.replace(/\/+$/, "")}/chat/completions`, body };
   },
   parseEvent: openai.parseEvent,
