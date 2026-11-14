@@ -1,10 +1,16 @@
-import { parseClientFrame, MAX_TEXT_CHARS, type AudioSpec, type Ctx, type ErrorCode, type ServerFrame, type Trigger } from "../shared/packages/protocol/src/index";
+import { parseClientFrame, MAX_TEXT_CHARS, type AudioSpec, type Ctx, type ErrorCode, type ServerFrame, type Settings, type SpeechStyle, type Trigger } from "../shared/packages/protocol/src/index";
 import type { GuardConfig } from "./auth";
-import type { RateLimiter } from "./rate-limit";
+import { SystemClock, type Clock, type TimerHandle } from "./clock";
+import { answerChat, answerNickname, answerSpeech, bestMatch, parseExtraction, parseForget, parseNicknameRequest, parseSpeechChange, recall, snippet } from "./intents";
 import { getProvider, KEY_VAR, streamLlm } from "./llm/providers";
+import { buildSystem, MEMORY_EXTRACT_SYSTEM } from "./llm/persona";
 import { loadSecrets } from "./llm/secrets";
-import { PERSONA_DRAFT } from "./llm/persona";
+import { L, forgetDone, nicknameSet, pick, withName } from "./lines";
 import type { Observability } from "./observe";
+import { ARRIVAL_DELAY_MS, MAX_MEMORY_RECALLS, detectEvents, eventAllowed, fuelKind, intervalMs, isNight, kstDay, newProState, wiperOn, type EventReason, type ProState, type Reason } from "./proactive";
+import type { RateLimiter } from "./rate-limit";
+import { checkInput, checkOutput, redirectLine } from "./safety";
+import { InMemoryTalkStore, type TalkStore } from "./talk-store";
 import { AudioPipeline, PCM_FORMAT, Semaphore, SentenceSplitter, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -13,6 +19,13 @@ const DEFAULT_MODELS: Record<string, string> = {
   gemini: "gemini-2.5-flash",
   "openai-compatible": "chat-fast",
 };
+
+/** 첫 소리를 빨리 내려고, 첫 조각만 쉼표에서도 끊는 최소 글자 수. */
+const FIRST_CLAUSE_MIN = 8;
+/** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
+const QUIET_AFTER_REPLY_MS = 6000;
+const RECENT_TURNS = 6;
+const PROACTIVE_MAX_TOKENS = 80;
 
 export interface TalkConfig {
   providerName: string;
@@ -45,6 +58,20 @@ interface Turn {
   abort: AbortController;
   cancelled: boolean;
   running: boolean;
+  /** 서버가 먼저 시작한 턴(사용자 입력 없음) */
+  proactive?: boolean;
+}
+
+/** 연결 하나의 메모리 상태. 저장하지 않는다. */
+interface Conn {
+  ctx: Ctx;
+  seen: boolean;
+  pro: ProState;
+  recent: { u: string; a: string }[];
+  arrival?: TimerHandle;
+  /** 마지막 답에 끼워 넣은 기억(그거 잊어줘의 "그거") */
+  lastMemoryId?: string;
+  quietUntil: number;
 }
 
 /** 업그레이드 때 붙이는 연결별 데이터. 티켓에서 온 installId·sessionId와 현재 턴 상태를 든다. */
@@ -54,9 +81,29 @@ export interface WsData {
   sessionId: string;
   hello: boolean;
   turn?: Turn;
+  conn?: Conn;
 }
 
-type Ws = { send(s: string | Uint8Array): unknown; close(code?: number, reason?: string): unknown; data: WsData };
+export type Ws = { send(s: string | Uint8Array): unknown; close(code?: number, reason?: string): unknown; data: WsData };
+
+/** 차(installId)별 열린 소켓. 폰이나 목소리로 설정이 바뀌면 차 앱에 settings 프레임을 보낸다. */
+export class TalkHub {
+  private readonly socks = new Map<string, Set<Ws>>();
+  add(ws: Ws): void {
+    const set = this.socks.get(ws.data.installId) ?? new Set<Ws>();
+    set.add(ws);
+    this.socks.set(ws.data.installId, set);
+  }
+  remove(ws: Ws): void {
+    const set = this.socks.get(ws.data.installId);
+    set?.delete(ws);
+    if (set?.size === 0) this.socks.delete(ws.data.installId);
+  }
+  pushSettings(installId: string, settings: Settings): void {
+    const msg = JSON.stringify({ type: "settings", settings } satisfies ServerFrame);
+    for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
+  }
+}
 
 export interface TalkGuard {
   guard: Pick<GuardConfig, "turnsPerMin" | "turnsPerDay">;
@@ -64,6 +111,12 @@ export interface TalkGuard {
   fetchImpl?: typeof fetch;
   /** null/undefined 이면 서버 TTS 없음(reply.start.audio = "none"). */
   tts?: TtsProvider | null;
+  /** 기억·설정·대화 상태. 없으면 프로세스 메모리 저장소. */
+  store?: TalkStore;
+  hub?: TalkHub;
+  clock?: Clock;
+  /** 기어가 P가 된 뒤 도착 인사까지(F10, 기본 3초). 시험에서만 바꾼다. */
+  arrivalDelayMs?: number;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -75,31 +128,83 @@ function cancel(d: WsData, turnId?: string): void {
   d.turn = undefined;
 }
 
-function ctxLine(ctx: Ctx): string {
-  const parts = Object.entries(ctx).map(([k, v]) => `${k}=${v}`);
-  return parts.length ? `\n\n[차량 상태] ${parts.join(", ")}` : "";
+/** 정차 판정은 fail-closed: 기어를 모르면 주행으로 본다. */
+export const isParked = (ctx: Ctx): boolean => ctx.gear === "P" && !(typeof ctx.speedKmh === "number" && ctx.speedKmh > 0);
+
+/** 한 턴에서 할 일. text 가 있으면 그대로 말하고, llm 이 있으면 모델에게 시킨다. */
+interface Plan {
+  text?: string;
+  llm?: { system: string; userText: string; maxTokens: number; /** 모델이 NONE 이라고 하면 대신 말할 문장 */ fallback?: string };
+  /** 기억 추출에 쓸 사용자 말(없으면 추출 안 함) */
+  extractFrom?: string[];
+  driving: boolean;
+  speech: SpeechStyle;
+  userText: string;
+}
+
+/** 모델 출력이 NONE 이면 fallback 으로 바꾼다. 앞 몇 글자를 먼저 모아 판단하므로 NONE 은 소리로 나가지 않는다. */
+async function* noneGuard(src: AsyncIterable<string>, fallback: string): AsyncGenerator<string> {
+  let head = "";
+  let decided = false;
+  for await (const d of src) {
+    if (decided) {
+      yield d;
+      continue;
+    }
+    head += d;
+    if (head.trim().length < 4) continue;
+    decided = true;
+    if (/^NONE/i.test(head.trim())) return void (yield fallback);
+    yield head;
+  }
+  if (!decided) yield /^NONE/i.test(head.trim()) || !head.trim() ? fallback : head;
 }
 
 /** /v1/talk 웹소켓 핸들러. 텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 1003으로 닫는다. */
 export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: TalkGuard) {
   const provider = getProvider(cfg.providerName);
   const sem = new Semaphore();
+  const store: TalkStore = opts?.store ?? new InMemoryTalkStore();
+  const hub = opts?.hub ?? new TalkHub();
+  const clock = opts?.clock ?? new SystemClock();
+  const arrivalDelay = opts?.arrivalDelayMs ?? ARRIVAL_DELAY_MS;
+  const fetchImpl = opts?.fetchImpl ?? fetch;
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
 
-  async function run(ws: Ws, t: Turn): Promise<void> {
-    const t0 = performance.now();
-    if (opts) {
-      try {
-        opts.limiter.hit(`turn:${ws.data.id}`, opts.guard.turnsPerMin, 60_000);
-        opts.limiter.hit("turn-day", opts.guard.turnsPerDay, 86_400_000);
-      } catch {
-        observer.reject("talk.rate_limited");
-        return fail(ws, "rate_limited", t.id);
-      }
+  const conn = (d: WsData): Conn => (d.conn ??= { ctx: {}, seen: false, pro: newProState(), recent: [], quietUntil: 0 });
+
+  async function* llmText(system: string, userText: string, maxTokens: number, signal: AbortSignal, meta?: { model?: string }): AsyncGenerator<string> {
+    const req = { model: cfg.model, system, userText, maxTokens, baseUrl: cfg.baseUrl };
+    yield* streamLlm(provider, req, cfg.apiKey!, fetchImpl, meta, signal);
+  }
+
+  /** 대화가 끝난 뒤 운전자가 직접 말한 것만 기억으로 남긴다(원문은 저장하지 않는다). 철회·끄기는 쓰기 직전에 다시 본다. */
+  async function extractMemory(installId: string, userTexts: string[]): Promise<void> {
+    const latest = userTexts.at(-1) ?? "";
+    if (!cfg.apiKey || latest.trim().length < 6 || !store.memoryAllowed(installId)) return;
+    const existing = store.listMemory(installId, 30).map((m) => m.text);
+    const system = `${MEMORY_EXTRACT_SYSTEM}\n\n이미 기억함:\n${existing.length ? existing.map((e) => `- ${e}`).join("\n") : "(없음)"}`;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20_000);
+    try {
+      let out = "";
+      for await (const d of llmText(system, `운전자가 말한 것:\n${userTexts.map((u) => `- ${u}`).join("\n")}`, 160, ctl.signal)) out += d;
+      const items = parseExtraction(out, existing);
+      if (!items.length || !store.memoryAllowed(installId)) return;
+      for (const it of items) store.addMemory(installId, it.kind, it.text);
+      observer.event("memory.added", { n: items.length });
+    } catch (e) {
+      observer.error("memory.extract_failed", String((e as Error).message).slice(0, 200));
+    } finally {
+      clearTimeout(timer);
     }
-    if (!cfg.apiKey) return fail(ws, "no_key", t.id);
-    t.running = true;
+  }
+
+  /** 턴을 실제로 말한다: 문장 단위로 안전 검사 → 자막 델타 → TTS. */
+  async function deliver(ws: Ws, t: Turn, plan: Plan): Promise<void> {
+    const t0 = performance.now();
+    const c = conn(ws.data);
     const tts = opts?.tts ?? null;
     const emit = (f: ServerFrame) => {
       if (!t.cancelled) send(ws, f);
@@ -127,28 +232,69 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         })
       : null;
     if (!pipeline) start("none");
-    const splitter = new SentenceSplitter();
+
+    const llmAbort = new AbortController();
+    t.abort.signal.addEventListener("abort", () => llmAbort.abort(), { once: true });
+    const spoken: string[] = [];
+    const say = (piece: string) => {
+      const text = spoken.length ? ` ${piece}` : piece;
+      spoken.push(piece);
+      if (started) emit({ type: "reply.delta", turnId: t.id, text });
+      else held.push(text);
+      pipeline?.add(piece);
+    };
+    /** 조각마다 출력 필터. unsafe 면 true(나머지 출력을 버리고 화제 전환 문장으로 끝낸다). */
+    const feed = (pieces: string[]): boolean => {
+      for (const p of pieces) {
+        const v = checkOutput(p, plan.driving);
+        if (v === "drop") continue;
+        if (v === "unsafe") return true;
+        say(p);
+      }
+      return false;
+    };
+
+    const splitter = new SentenceSplitter({ firstClauseMin: FIRST_CLAUSE_MIN });
     let first: number | null = null;
-    let full = "";
     const meta: { model?: string } = {};
     try {
-      const req = { model: cfg.model, system: PERSONA_DRAFT + ctxLine(t.ctx), userText: t.text, maxTokens: cfg.maxTokens, baseUrl: cfg.baseUrl };
-      for await (const d of streamLlm(provider, req, cfg.apiKey, opts?.fetchImpl ?? fetch, meta, t.abort.signal)) {
+      let src: AsyncIterable<string>;
+      if (plan.llm) {
+        let s: AsyncIterable<string> = llmText(plan.llm.system, plan.llm.userText, plan.llm.maxTokens, llmAbort.signal, meta);
+        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback);
+        src = s;
+      } else {
+        src = (async function* () {
+          yield plan.text ?? "";
+        })();
+      }
+      let unsafe = false;
+      for await (const d of src) {
         if (t.cancelled) return;
         first ??= Math.round(performance.now() - t0);
-        full += d;
-        if (started) emit({ type: "reply.delta", turnId: t.id, text: d });
-        else held.push(d);
-        for (const s of splitter.push(d)) pipeline?.add(s);
+        if (feed(splitter.push(d))) {
+          unsafe = true;
+          llmAbort.abort();
+          break;
+        }
       }
-      for (const s of splitter.flush()) pipeline?.add(s);
+      if (!unsafe) unsafe = feed(splitter.flush());
+      if (unsafe || spoken.length === 0) {
+        observer.event("talk.output_filtered", { unsafe: Number(unsafe) });
+        say(redirectLine(plan.speech));
+      }
       pipeline?.finish();
       await pipeline?.done;
       if (t.cancelled) return;
       if (!started) start("none");
       const totalMs = Math.round(performance.now() - t0);
+      const full = spoken.join(" ");
       emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
-      observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model });
+      observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model, proactive: Number(t.proactive === true) });
+      c.recent.push({ u: plan.userText, a: full });
+      if (c.recent.length > RECENT_TURNS) c.recent.shift();
+      c.quietUntil = clock.now() + QUIET_AFTER_REPLY_MS;
+      if (plan.extractFrom) void extractMemory(ws.data.installId, plan.extractFrom);
     } catch (e) {
       if (t.cancelled) return;
       t.abort.abort();
@@ -160,11 +306,264 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     }
   }
 
+  const fixed = (text: string, speech: SpeechStyle, userText: string, driving: boolean): Plan => ({ text, driving, speech, userText });
+
+  function setSettings(installId: string, patch: Partial<Settings>): Settings {
+    const next = store.patchSettings(installId, patch);
+    hub.pushSettings(installId, next);
+    return next;
+  }
+
+  /** 첫 만남(F2) 질문 한 줄. */
+  const meetQuestion = (stage: number, s: Settings): string => {
+    const line = stage === 1 ? L.askSpeech : stage === 2 ? L.askNickname : L.askChat;
+    return pick(line, s.speech);
+  };
+
+  /** 사용자 말 한 턴을 무엇으로 답할지 정한다. 말로 하는 설정·지우기·첫 만남·안전 필터가 LLM보다 먼저다. */
+  function planUserTurn(ws: Ws, t: Turn): Plan {
+    const d = ws.data;
+    const c = conn(d);
+    const s = store.getSettings(d.installId);
+    const ctx = { ...c.ctx, ...t.ctx };
+    const parked = isParked(ctx);
+    const driving = !parked;
+    const text = t.text.trim();
+
+    const refusal = checkInput(text, s.speech);
+    if (refusal) {
+      observer.event("talk.safety_refused", { kind: refusal.kind });
+      return fixed(refusal.line, s.speech, text, driving);
+    }
+
+    // F2 첫 만남: 어투 → 호칭 → 수다 정도. 정차 중에만 답으로 받는다.
+    const st = store.getTalkState(d.installId);
+    if (parked && st.meetStage >= 1 && st.meetStage <= 3) {
+      if (st.meetStage === 1) {
+        const sp = answerSpeech(text) ?? s.speech;
+        const next = setSettings(d.installId, { speech: sp });
+        store.patchTalkState(d.installId, { meetStage: 2 });
+        return fixed(pick(L.askNickname, next.speech), next.speech, text, driving);
+      }
+      if (st.meetStage === 2) {
+        const nick = answerNickname(text);
+        const next = setSettings(d.installId, { nickname: nick ?? null });
+        store.patchTalkState(d.installId, { meetStage: 3 });
+        return fixed(withName(pick(L.askChat, next.speech), next.nickname, next.speech), next.speech, text, driving);
+      }
+      const lvl = answerChat(text) ?? "normal";
+      const next = setSettings(d.installId, { proactive: lvl });
+      store.patchTalkState(d.installId, { meetStage: 4 });
+      return fixed(withName(pick(L.meetDone, next.speech), next.nickname, next.speech), next.speech, text, driving);
+    }
+
+    // F12 말로 지우기
+    const forget = parseForget(text);
+    if (forget) {
+      if (!parked) return fixed(pick(L.forgetDriving, s.speech), s.speech, text, driving);
+      if (forget.kind === "all") return fixed(pick(L.forgetAll, s.speech), s.speech, text, driving);
+      const items = store.listMemory(d.installId, 200);
+      const target = forget.kind === "it" ? items.find((m) => m.id === c.lastMemoryId) ?? null : bestMatch(forget.topic, items);
+      if (!target) return fixed(pick(items.length ? L.forgetUnknown : L.forgetEmpty, s.speech), s.speech, text, driving);
+      store.deleteMemory(d.installId, target.id);
+      if (c.lastMemoryId === target.id) c.lastMemoryId = undefined;
+      observer.event("memory.deleted_by_voice", {});
+      return fixed(forgetDone(snippet(target.text), s.speech), s.speech, text, driving);
+    }
+
+    // F11 어투·호칭 바꾸기
+    const sp = parseSpeechChange(text);
+    if (sp) {
+      const next = setSettings(d.installId, { speech: sp });
+      return fixed(pick(sp === "jondaetmal" ? L.speechJondaetmal : L.speechBanmal, next.speech), next.speech, text, driving);
+    }
+    const nickReq = parseNicknameRequest(text);
+    if (nickReq) {
+      const next = setSettings(d.installId, { nickname: nickReq });
+      return fixed(nicknameSet(nickReq, next.speech), next.speech, text, driving);
+    }
+
+    // 일반 대화: 기억을 떠올려 프롬프트에 넣는다.
+    const memories = store.memoryAllowed(d.installId) ? recall(store.listMemory(d.installId, 40), text, 4) : [];
+    c.lastMemoryId = memories[0]?.id;
+    const system = buildSystem({ speech: s.speech, nickname: s.nickname, driving, ctx, memories, recent: c.recent });
+    const userTexts = [...c.recent.map((r) => r.u).filter(Boolean).slice(-2), text];
+    return { llm: { system, userText: text, maxTokens: cfg.maxTokens }, extractFrom: userTexts, driving, speech: s.speech, userText: text };
+  }
+
+  async function runUser(ws: Ws, t: Turn): Promise<void> {
+    if (opts) {
+      try {
+        opts.limiter.hit(`turn:${ws.data.id}`, opts.guard.turnsPerMin, 60_000);
+        opts.limiter.hit("turn-day", opts.guard.turnsPerDay, 86_400_000);
+      } catch {
+        observer.reject("talk.rate_limited");
+        return fail(ws, "rate_limited", t.id);
+      }
+    }
+    t.running = true;
+    let plan: Plan;
+    try {
+      plan = planUserTurn(ws, t);
+    } catch (e) {
+      observer.error("talk.plan_failed", String((e as Error).message).slice(0, 200));
+      ws.data.turn = undefined;
+      return fail(ws, "llm_failed", t.id);
+    }
+    if (plan.llm && !cfg.apiKey) {
+      ws.data.turn = undefined;
+      return fail(ws, "no_key", t.id);
+    }
+    await deliver(ws, t, plan);
+  }
+
+  // ---------------- 먼저 말 걸기 ----------------
+
+  function startProactive(ws: Ws, reason: Reason, plan: Plan): boolean {
+    const d = ws.data;
+    const c = conn(d);
+    if (d.turn || clock.now() < c.quietUntil) return false;
+    if (plan.llm && !cfg.apiKey) return false;
+    const t: Turn = { id: `p-${crypto.randomUUID().slice(0, 12)}`, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
+    d.turn = t;
+    send(ws, { type: "proactive", id: t.id, reason });
+    observer.event("talk.proactive", { reason });
+    void deliver(ws, t, plan);
+    return true;
+  }
+
+  const clearArrival = (c: Conn) => {
+    if (c.arrival) clock.clearTimeout(c.arrival);
+    c.arrival = undefined;
+  };
+
+  /** 프롬프트에 기억을 담은 먼저 말 계획(모델이 NONE 이라 하면 fallback 문장). */
+  function memoryPlan(ws: Ws, s: Settings, ctx: Ctx, reason: string, instruction: string, fallback: string): Plan {
+    const d = ws.data;
+    const c = conn(d);
+    const memories = store.memoryAllowed(d.installId) && c.pro.memoryRecalls < MAX_MEMORY_RECALLS ? store.listMemory(d.installId, 12) : [];
+    if (!memories.length) return fixed(fallback, s.speech, "", false);
+    c.pro.memoryRecalls++;
+    c.lastMemoryId = memories[0]?.id;
+    const system = buildSystem({ speech: s.speech, nickname: s.nickname, driving: false, ctx, memories, recent: c.recent, proactive: { reason, instruction } });
+    return { llm: { system, userText: "(먼저 말을 건다)", maxTokens: PROACTIVE_MAX_TOKENS, fallback }, driving: false, speech: s.speech, userText: "" };
+  }
+
+  function arrivalPlan(ws: Ws, s: Settings, ctx: Ctx): Plan {
+    const c = conn(ws.data);
+    const ev = c.pro.dayEvents;
+    const fallback = withName(pick(ev.has("rain") ? L.arriveRain : ev.has("dark") ? L.arriveDark : L.arriveDefault, s.speech), s.nickname, s.speech);
+    const instruction =
+      '방금 목적지에 도착해 주차(P)했다. [기억] 중에 오늘 이어서 챙길 만한 것(면접, 약속, 걱정 등)이 있으면 그것에 대한 도착 마무리 인사를 한 문장으로 한다(예: "도착했네! 면접 꼭 잘 보고 와, 끝나고 어땠는지 알려 줘!"). 챙길 만한 게 없으면 정확히 NONE 한 단어만 쓴다.';
+    return memoryPlan(ws, s, ctx, "arrival", instruction, fallback);
+  }
+
+  function greetingPlan(ws: Ws, s: Settings, ctx: Ctx): Plan {
+    const fallback = withName(pick(L.greetDefault, s.speech), s.nickname, s.speech);
+    const instruction =
+      '오늘 처음 탔다. [기억] 중에 이어서 물어볼 만한 것이 있으면 그것으로 첫 인사를 한 문장으로 한다(예: "저번에 면접 본다고 했잖아, 어떻게 됐어?"). 없으면 정확히 NONE 한 단어만 쓴다.';
+    return memoryPlan(ws, s, ctx, "greeting", instruction, fallback);
+  }
+
+  function eventLine(reason: EventReason, s: Settings, ctx: Ctx): string {
+    switch (reason) {
+      case "wiper": return pick(L.wiper, s.speech);
+      case "headlight": return pick(L.headlight, s.speech);
+      case "door": return pick(L.door, s.speech);
+      case "range": {
+        const k = fuelKind(ctx.fuelType);
+        return pick(k === "ev" ? L.rangeEv : k === "lpg" ? L.rangeLpg : L.rangeIce, s.speech);
+      }
+    }
+  }
+
+  /** 서버가 "지금 말을 걸까"를 정하는 곳. 차 앱이 보낸 ctx 스냅샷이 바뀔 때마다 부른다. */
+  function onVehicle(ws: Ws, prev: Ctx, cur: Ctx): void {
+    const d = ws.data;
+    const c = conn(d);
+    const now = clock.now();
+    const pro = c.pro;
+    const baseline = !c.seen && Object.keys(prev).length === 0;
+    c.seen = true;
+
+    const moving = cur.gear === "D" || cur.gear === "R" || (typeof cur.speedKmh === "number" && cur.speedKmh > 0);
+    if (moving) {
+      pro.drove = true;
+      clearArrival(c);
+    }
+    // 오늘 있었던 일(도착 인사 ②)은 말했든 안 했든 센다.
+    if (!baseline) {
+      if (wiperOn(cur.wiper) && !wiperOn(prev.wiper)) pro.dayEvents.add("rain");
+      if (cur.headlight === true && prev.headlight !== true && isNight(now)) pro.dayEvents.add("dark");
+    }
+
+    const s = store.getSettings(d.installId);
+    const gap = intervalMs(s.proactive);
+    const gearP = cur.gear === "P";
+    const navi = cur.naviGuiding === true;
+
+    // 기어 P로 바뀜: 첫 정차(인사·첫 만남) 또는 도착(3초 뒤 한마디)
+    if (gearP && prev.gear !== "P") {
+      if (baseline && !pro.greetChecked) {
+        pro.greetChecked = true;
+        if (gap !== null && !navi) {
+          const st = store.getTalkState(d.installId);
+          if (st.meetStage === 0) {
+            if (startProactive(ws, "meet", fixed(meetQuestion(1, s), s.speech, "", false))) {
+              store.patchTalkState(d.installId, { meetStage: 1, lastGreetingDay: kstDay(now) });
+            }
+            return;
+          }
+          // 질문을 받고도 답이 없었던 첫 만남은 기본값으로 끝낸다("무응답이면 기본값").
+          if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
+          const today = kstDay(now);
+          if (st.lastGreetingDay !== today && startProactive(ws, "greeting", greetingPlan(ws, s, cur))) {
+            store.patchTalkState(d.installId, { lastGreetingDay: today });
+          }
+        }
+        return;
+      }
+      if (pro.drove) {
+        clearArrival(c);
+        c.arrival = clock.setTimeout(() => {
+          c.arrival = undefined;
+          const cur2 = c.ctx;
+          if (cur2.gear !== "P" || cur2.naviGuiding === true || !pro.drove) return;
+          const s2 = store.getSettings(d.installId);
+          if (intervalMs(s2.proactive) !== null) startProactive(ws, "arrival", arrivalPlan(ws, s2, cur2));
+          // 새 주행을 위해 한 주행 단위 상태를 비운다. 말을 못 걸었더라도(내비·재생 중) 낡은 도착을 다음에 말하지 않는다.
+          pro.drove = false;
+          pro.fired.clear();
+          pro.memoryRecalls = 0;
+          pro.dayEvents.clear();
+        }, arrivalDelay);
+      }
+      return;
+    }
+
+    // 이벤트 한마디(와이퍼·거리·라이트·도어): 끄기·내비·간격·같은 주행 1회·이유별 쿨다운을 지킨다.
+    if (baseline || gap === null || navi) return;
+    // 첫 만남 질문이 열려 있는데 이벤트가 먼저 오면 질문은 접고 기본값으로 간다(이벤트가 우선).
+    const stage = store.getTalkState(d.installId).meetStage;
+    for (const reason of detectEvents(prev, cur, now)) {
+      if (!eventAllowed(reason, s.proactive, cur, pro, now)) continue;
+      if (startProactive(ws, reason, fixed(eventLine(reason, s, cur), s.speech, "", !isParked(cur)))) {
+        pro.fired.add(reason);
+        pro.reasonAt[reason] = now;
+        pro.lastEventAt = now;
+        if (stage >= 1 && stage <= 3) store.patchTalkState(d.installId, { meetStage: 4 });
+      }
+    }
+  }
+
   return {
     open(ws: Ws) {
+      hub.add(ws);
       observer.event("talk.open", { conn: ws.data.id.slice(0, 8) });
     },
     close(ws: Ws) {
+      hub.remove(ws);
+      if (ws.data.conn) clearArrival(ws.data.conn);
       cancel(ws.data);
     },
     async message(ws: Ws, data: string | Buffer | ArrayBuffer | Uint8Array) {
@@ -184,12 +583,17 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       switch (f.type) {
         case "turn.start":
           cancel(d);
+          clearArrival(conn(d));
           d.turn = { id: f.turnId, trigger: f.trigger, text: "", ctx: {}, abort: new AbortController(), cancelled: false, running: false };
           return;
         case "ctx": {
+          const c = conn(d);
           const t = f.turnId === undefined ? d.turn : d.turn?.id === f.turnId ? d.turn : undefined;
-          if (!t) return fail(ws, "turn_unknown", f.turnId);
-          Object.assign(t.ctx, f.ctx);
+          if (f.turnId !== undefined && !t) return fail(ws, "turn_unknown", f.turnId);
+          if (t) Object.assign(t.ctx, f.ctx);
+          const prev = c.ctx;
+          c.ctx = { ...prev, ...f.ctx };
+          if (f.turnId === undefined) onVehicle(ws, prev, c.ctx);
           return;
         }
         case "text": {
@@ -206,9 +610,10 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
           const t = d.turn;
           if (!t || t.id !== f.turnId || t.running) return fail(ws, "turn_unknown", f.turnId);
           if (!t.text.trim()) return fail(ws, "bad_frame", f.turnId);
-          return run(ws, t);
+          return runUser(ws, t);
         }
       }
     },
   };
 }
+
