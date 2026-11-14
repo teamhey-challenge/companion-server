@@ -110,9 +110,14 @@ export class TalkHub {
     const msg = JSON.stringify({ type: "settings", settings } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
   }
+  /** talkHandlers 가 건다: 동의가 바뀔 때마다 그 차의 각 소켓에 부른다. */
+  onRevoke?: (ws: Ws) => void;
   /** 동의가 바뀌었다: 동의 때문에 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
   consentChanged(installId: string): void {
-    for (const ws of this.socks.get(installId) ?? []) ws.data.conn?.resumeFirstStop?.();
+    for (const ws of this.socks.get(installId) ?? []) {
+      ws.data.conn?.resumeFirstStop?.();
+      this.onRevoke?.(ws);
+    }
   }
 }
 
@@ -188,7 +193,23 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
 
-  const conn = (d: WsData): Conn => (d.conn ??= { ctx: {}, seen: false, pro: newProState(), recent: [], quietUntil: 0 });
+  const conn = (d: WsData): Conn =>
+    (d.conn ??= {
+      ctx: {}, seen: false, pro: newProState(), recent: [], quietUntil: 0,
+    });
+
+  /** record·external_ai 철회: 대기 중인 도착 타이머와 진행 중인 턴(먼저 말 걸기 포함)을 바로 끊고 차 앱에 알린다(AC-4.9-05). */
+  function revokeTalk(ws: Ws): void {
+    const d = ws.data;
+    if (store.talkAllowed(d.installId)) return;
+    if (d.conn) clearArrival(d.conn);
+    const t = d.turn;
+    if (t) {
+      cancel(d, t.id);
+      observer.reject("talk.consent_withdrawn");
+      fail(ws, "consent_required", t.id);
+    }
+  }
 
   async function* llmText(system: string, userText: string, maxTokens: number, signal: AbortSignal, meta?: { model?: string }): AsyncGenerator<string> {
     const req = { model: cfg.model, system, userText, maxTokens, baseUrl: cfg.baseUrl };
@@ -630,6 +651,8 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       }
     }
   }
+
+  hub.onRevoke = revokeTalk;
 
   return {
     open(ws: Ws) {
