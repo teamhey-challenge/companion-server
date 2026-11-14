@@ -7,7 +7,9 @@ export const openaiCompatible: LlmProvider = {
   buildRequest(req, apiKey) {
     if (!req.baseUrl) throw new Error("openai-compatible: LLM_BASE_URL 필요");
     const spec = openai.buildRequest(req, apiKey);
-    const body: Record<string, unknown> = { ...(spec.body as Record<string, unknown>), max_tokens: req.maxTokens };
+    // 추론(thinking)을 끈다. 켜 두면 max_tokens 를 추론에 다 써서 content 가 비거나(→ OmniRoute 가 느린 deepseek 으로 넘김, 5~9초)
+    // 추론 문장이 그대로 말로 새 나간다(2026-11-14 call_logs: reasoning 300/300 토큰, content null).
+    const body: Record<string, unknown> = { ...(spec.body as Record<string, unknown>), max_tokens: req.maxTokens, thinking: { type: "disabled" } };
     // 게이트웨이는 max_completion_tokens를 모를 수 있어 호환성이 넓은 max_tokens를 쓴다.
     delete body.max_completion_tokens;
     return { ...spec, url: `${req.baseUrl.replace(/\/+$/, "")}/chat/completions`, body };

@@ -11,6 +11,7 @@ import { ARRIVAL_DELAY_MS, MAX_MEMORY_RECALLS, detectEvents, eventAllowed, fuelK
 import type { RateLimiter } from "./rate-limit";
 import { checkInput, checkOutput, redirectLine } from "./safety";
 import { InMemoryTalkStore, type TalkStore } from "./talk-store";
+import { hedged } from "./llm/hedge";
 import { AudioPipeline, PCM_FORMAT, Semaphore, SentenceSplitter, type TtsProvider } from "./tts";
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -22,10 +23,14 @@ const DEFAULT_MODELS: Record<string, string> = {
 
 /** 첫 소리를 빨리 내려고, 첫 조각만 쉼표에서도 끊는 최소 글자 수. */
 const FIRST_CLAUSE_MIN = 8;
+/** 쉼표·문장 끝이 없어도, 첫 조각은 이만큼 모이면(마지막 띄어쓰기에서) 바로 TTS 로 보낸다. */
+const FIRST_WORDS_MIN = 12;
 /** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
 const QUIET_AFTER_REPLY_MS = 6000;
 const RECENT_TURNS = 6;
 const PROACTIVE_MAX_TOKENS = 80;
+/** 첫 토큰이 이 시간 안에 안 오면 같은 요청을 한 번 더 보내 먼저 오는 쪽을 쓴다(2026-11-14 측정: 정상 1.4~1.6초, 꼬리 4~9초). */
+const HEDGE_AFTER_MS = 2000;
 
 export interface TalkConfig {
   providerName: string;
@@ -176,7 +181,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
   async function* llmText(system: string, userText: string, maxTokens: number, signal: AbortSignal, meta?: { model?: string }): AsyncGenerator<string> {
     const req = { model: cfg.model, system, userText, maxTokens, baseUrl: cfg.baseUrl };
-    yield* streamLlm(provider, req, cfg.apiKey!, fetchImpl, meta, signal);
+    yield* hedged((leg) => streamLlm(provider, req, cfg.apiKey!, fetchImpl, leg.meta, AbortSignal.any([signal, leg.signal])), HEDGE_AFTER_MS, signal, meta);
   }
 
   /** 대화가 끝난 뒤 운전자가 직접 말한 것만 기억으로 남긴다(원문은 저장하지 않는다). 철회·끄기는 쓰기 직전에 다시 본다. */
@@ -226,6 +231,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
             start(ok ? PCM_FORMAT : "none");
           },
           onChunk: (pcm) => {
+            firstByte ??= Math.round(performance.now() - t0);
             if (!t.cancelled) ws.send(pcm);
           },
           onError: (e) => observer.error("tts.failed", e.message),
@@ -254,8 +260,9 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       return false;
     };
 
-    const splitter = new SentenceSplitter({ firstClauseMin: FIRST_CLAUSE_MIN });
+    const splitter = new SentenceSplitter({ firstClauseMin: FIRST_CLAUSE_MIN, firstWordsMin: FIRST_WORDS_MIN });
     let first: number | null = null;
+    let firstByte: number | null = null;
     const meta: { model?: string } = {};
     try {
       let src: AsyncIterable<string>;
@@ -291,6 +298,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const full = spoken.join(" ");
       emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
       observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model, proactive: Number(t.proactive === true) });
+      observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
       c.recent.push({ u: plan.userText, a: full });
       if (c.recent.length > RECENT_TURNS) c.recent.shift();
       c.quietUntil = clock.now() + QUIET_AFTER_REPLY_MS;

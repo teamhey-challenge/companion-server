@@ -50,7 +50,7 @@ describe("request building", () => {
     expect(r.url).toBe("http://gw:1/v1/chat/completions");
     expect(r.headers.authorization).toBe("Bearer KEY");
     expect(r.body).toEqual({
-      model: "m-1", max_tokens: 123, stream: true,
+      model: "m-1", max_tokens: 123, stream: true, thinking: { type: "disabled" },
       messages: [{ role: "system", content: "SYS" }, { role: "user", content: "안녕" }],
     });
     expect(() => getProvider("openai-compatible").buildRequest(req, "KEY")).toThrow("LLM_BASE_URL");

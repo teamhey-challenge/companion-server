@@ -22,6 +22,38 @@ export const NULL_OBSERVER: RelayObserver = {
 /** 로그에 쓰는 id의 짧은 해시 */
 export const idHash = shortId;
 
+/** 한 턴의 지연 기록. 시간은 턴 시작(서버가 turn.end 를 받은 뒤 말하기를 시작한 때)부터 잰다. */
+export interface TurnTiming {
+  /** 모델을 쓰지 않은 고정 문구 턴은 null */
+  llmFirstTokenMs: number | null;
+  /** 첫 오디오 바이트까지. TTS 없음/실패면 null */
+  firstTtsByteMs: number | null;
+  totalMs: number;
+  model: string;
+}
+
+interface Pct {
+  p50: number;
+  p95: number;
+}
+
+export interface LatencySummary {
+  n: number;
+  llmFirstTokenMs: Pct | null;
+  firstTtsByteMs: Pct | null;
+  totalMs: Pct | null;
+  models: Record<string, number>;
+}
+
+const TIMING_WINDOW = 50;
+
+function stat(values: Array<number | null>): Pct | null {
+  const v = values.filter((x): x is number => x !== null).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const at = (p: number) => v[Math.min(v.length - 1, Math.ceil((p / 100) * v.length) - 1)]!;
+  return { p50: at(50), p95: at(95) };
+}
+
 export interface ErrorSummary {
   counts: Record<string, number>;
   last?: { code: string; ageMs: number };
@@ -30,6 +62,7 @@ export interface ErrorSummary {
 /** 한 줄 JSON 로그 + 오류 코드 집계. 로그 쓰기가 던져도 서버로 새지 않는다. */
 export class Observability implements RelayObserver {
   private readonly counts = new Map<string, number>();
+  private readonly timings: TurnTiming[] = [];
   private last: { code: string; at: number } | undefined;
 
   constructor(
@@ -61,6 +94,25 @@ export class Observability implements RelayObserver {
 
   reject(code: string): void {
     this.bump(code);
+  }
+
+  /** 턴 지연 한 줄 로그 + 최근 50턴 링. 값이 없으면 -1. */
+  turn(t: TurnTiming): void {
+    this.timings.push(t);
+    if (this.timings.length > TIMING_WINDOW) this.timings.shift();
+    this.emit({ ev: "talk.timing", llm_first_token_ms: t.llmFirstTokenMs ?? -1, first_tts_byte_ms: t.firstTtsByteMs ?? -1, total_ms: t.totalMs, model: t.model });
+  }
+
+  latency(): LatencySummary {
+    const models: Record<string, number> = {};
+    for (const t of this.timings) models[t.model] = (models[t.model] ?? 0) + 1;
+    return {
+      n: this.timings.length,
+      llmFirstTokenMs: stat(this.timings.map((t) => t.llmFirstTokenMs)),
+      firstTtsByteMs: stat(this.timings.map((t) => t.firstTtsByteMs)),
+      totalMs: stat(this.timings.map((t) => t.totalMs)),
+      models,
+    };
   }
 
   errors(): ErrorSummary {

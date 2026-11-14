@@ -180,7 +180,7 @@ export class SentenceSplitter {
   private buf = "";
   private emitted = 0;
 
-  constructor(private readonly opts: { firstClauseMin?: number } = {}) {}
+  constructor(private readonly opts: { firstClauseMin?: number; firstWordsMin?: number } = {}) {}
 
   push(delta: string): string[] {
     this.buf += delta;
@@ -205,6 +205,15 @@ export class SentenceSplitter {
       if (piece.length >= MIN_SENTENCE_CHARS) {
         out.push(piece);
         start = end;
+      }
+    }
+    // 쉼표도 문장 끝도 없이 길어지면, 첫 조각만 마지막 띄어쓰기에서 끊는다(첫 소리를 더 앞당긴다).
+    const words = this.opts.firstWordsMin;
+    if (words !== undefined && this.emitted === 0 && out.length === 0) {
+      const cut = this.buf.lastIndexOf(" ");
+      if (cut >= words && !/[.!?。！？…\n]/.test(this.buf.slice(0, cut))) {
+        out.push(this.buf.slice(0, cut).trim());
+        start = cut;
       }
     }
     this.buf = this.buf.slice(start);
@@ -317,8 +326,9 @@ export class AudioPipeline {
         }
       }
       if (job.error) {
-        if (!started) break;
+        // 첫 문장이 실패해도 원인은 남긴다(그 뒤 onStart(false) 로 자막만 보낸다).
         this.sink.onError(job.error);
+        if (!started) break;
         return;
       }
     }
