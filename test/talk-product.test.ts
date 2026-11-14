@@ -301,6 +301,17 @@ describe("proactive decision", () => {
     car.close();
   });
 
+  test("F2: the first ctx has no gear yet (the car's gear listener answers late), then P -> the first meeting still starts", async () => {
+    const car = await Car.connect(boot(newLlm()));
+    await car.consent("record");
+    await car.consent("external_ai");
+    car.ctx({ speedKmh: 0, naviGuiding: false });
+    car.ctx({ gear: "P", speedKmh: 0, naviGuiding: false });
+    await car.until((f) => f.some((x) => x.type === "reply.end"));
+    expect(proactives(car).map((p) => p.reason)).toEqual(["meet"]);
+    car.close();
+  });
+
   test("F3: after the first meeting there is no second greeting the same day, but the next day greets with the default line", async () => {
     const real = new SystemClock();
     let offset = 0;
