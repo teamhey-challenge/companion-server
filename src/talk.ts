@@ -23,6 +23,8 @@ const DEFAULT_MODELS: Record<string, string> = {
 
 /** 첫 토큰이 이 시간 안에 안 오면, 미리 만들어 둔 짧은 채움말을 한 번 들려준다(차에서 약 1.5초 안에 소리가 나도록). */
 const FILLER_AFTER_MS = 1200;
+/** 한 턴이 LLM 에 쓸 수 있는 전체 시간. 넘으면 스트림을 끊고 `error llm_failed` 로 끝낸다(차의 30초 감시보다 짧다, PLEOS-134). */
+const LLM_DEADLINE_MS = 20_000;
 /** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
 const QUIET_AFTER_REPLY_MS = 6000;
 const RECENT_TURNS = 6;
@@ -122,6 +124,8 @@ export interface TalkGuard {
   arrivalDelayMs?: number;
   /** 첫 토큰이 이 시간 안에 안 오면 채움말을 낸다(기본 1.2초). 시험에서만 바꾼다. */
   fillerAfterMs?: number;
+  /** 한 턴이 LLM 에 쓸 수 있는 전체 시간(기본 20초). 시험에서만 바꾼다. */
+  llmDeadlineMs?: number;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -173,6 +177,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   const clock = opts?.clock ?? new SystemClock();
   const arrivalDelay = opts?.arrivalDelayMs ?? ARRIVAL_DELAY_MS;
   const fillerAfter = opts?.fillerAfterMs ?? FILLER_AFTER_MS;
+  const llmDeadline = opts?.llmDeadlineMs ?? LLM_DEADLINE_MS;
   const fetchImpl = opts?.fetchImpl ?? fetch;
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
@@ -284,6 +289,12 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
             if (first === null && !t.cancelled && !llmAbort.signal.aborted) pipeline.add(fillerLine, true);
           }, fillerAfter)
         : undefined;
+    // 모델이 첫 토큰 뒤에 멈추거나 끝없이 이어져도 턴을 열어 두지 않는다: 전체 기한이 지나면 스트림을 끊고 error 프레임으로 끝낸다.
+    let timedOut = false;
+    const deadlineTimer = setTimeout(() => {
+      timedOut = true;
+      llmAbort.abort();
+    }, llmDeadline);
     try {
       let src: AsyncIterable<string>;
       if (plan.llm) {
@@ -296,7 +307,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         })();
       }
       let unsafe = false;
+      const check = () => {
+        if (timedOut) throw new Error("llm deadline exceeded");
+      };
       for await (const d of src) {
+        check();
         if (t.cancelled) return;
         first ??= Math.round(performance.now() - t0);
         if (feed(splitter.push(d))) {
@@ -305,6 +320,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
           break;
         }
       }
+      check();
       if (!unsafe) unsafe = feed(splitter.flush());
       if (unsafe || spoken.length === 0) {
         observer.event("talk.output_filtered", { unsafe: Number(unsafe) });
@@ -331,6 +347,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       send(ws, { type: "error", code: "llm_failed", turnId: t.id, message: String((e as Error).message).slice(0, 300) });
     } finally {
       clearTimeout(fillerTimer);
+      clearTimeout(deadlineTimer);
       if (ws.data.turn === t) ws.data.turn = undefined;
     }
   }
