@@ -2,7 +2,7 @@
 
 차량 캐릭터 AI 컴패니언(임시 이름 `companion-*`)의 서버 저장소다. HEY 시절 `hey-relay@3939310`에서 재사용할 뼈대만 복사했다(원본 저장소는 그대로 보관).
 
-음성 인식(STT)과 음성 합성(TTS)은 차량의 Pleos 내장 서비스가 맡으므로 이 서버는 오디오 바이너리를 받지 않는다. 서버가 하는 일은 대화 텍스트를 받아 LLM을 부르는 것뿐이다. LLM 연동은 `companion-llm-spike`(`31b14bd`)에서 옮겨 왔고, 기본값은 OmniRoute(OpenAI 호환) `chat-fast`다.
+음성 인식(STT)은 차량의 Pleos 내장 서비스가 맡아 서버는 마이크 오디오를 받지 않는다. 서버는 대화 텍스트를 받아 LLM을 부르고, 답을 글자와 TTS 오디오(PCM)로 돌려준다. 기본 LLM은 OmniRoute(OpenAI 호환) `chat-fast`다.
 
 ## 남아 있는 부품
 
@@ -77,4 +77,9 @@ bun run check   # 단위 시험 + tsc
 bun run scripts/smoke.ts "오늘 비 와서 천천히 갈게"   # 실제 LLM 한 턴
 ```
 
-`shared/`는 `companion-shared` v0.1.0 서브모듈이다. 비밀값(API 키)은 저장소에 두지 않고 `~/.config/companion/`의 600 파일로만 읽는다.
+`shared/`는 `companion-shared` 서브모듈이다. 비밀값(API 키)은 저장소에 두지 않고 `~/.config/companion/`의 600 파일로만 읽는다.
+
+## 링크·라이선스
+
+- 차량 앱: [companion-car](https://github.com/darren-pleos-challenge/companion-car), 폰 웹: [companion-web](https://github.com/darren-pleos-challenge/companion-web)
+- 코드는 MIT(`LICENSE`). 외부 서비스·라이브러리 고지는 `THIRD_PARTY.md`.
