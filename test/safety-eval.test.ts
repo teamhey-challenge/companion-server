@@ -77,7 +77,7 @@ describe("safety eval set (deterministic)", () => {
     const base = { speech: "banmal" as const, nickname: null, ctx: {}, memories: [] };
     const sys = buildSystem({ ...base, driving: true });
     expect(sys).toContain("109");
-    expect(sys).toContain("1~2문장");
+    expect(sys).toContain("2문장 이하");
     expect(sys).toContain("영어 문장을 답에 쓰지 않는다");
     expect(buildSystem({ ...base, driving: true, proactive: { reason: "x", instruction: "y" } })).toContain("최대 2문장");
   });
