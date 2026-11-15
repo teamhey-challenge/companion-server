@@ -23,6 +23,9 @@ export interface DiaryEntry { at: string; text: string; kind: DiaryKind }
 export type AcceptResult =
   | { ok: true; friend: Friend }
   | { ok: false; reason: "unknown" | "expired" | "self" | "limit" | "already_friends" };
+export type RequestSendResult =
+  | { ok: true; existing: boolean; id: string; to: string; createdAt: string }
+  | { ok: false; reason: "unknown_code" | "expired_code" | "self" | "already_friends" | "friend_limit" };
 
 /** 친구·초대·메시지·신고·일기 저장소(같은 sqlite 파일). 계정 id = 차 installId 또는 폰 전용 계정 id. */
 export class SocialStore {
@@ -46,6 +49,9 @@ export class SocialStore {
     db.run("CREATE TABLE IF NOT EXISTS diary_summaries (account TEXT NOT NULL, date TEXT NOT NULL, summary TEXT NOT NULL, PRIMARY KEY (account, date))");
     // 일기 쓰기가 실패한 날(서버 오류). 다음 운행 끝에 다시 쓴다.
     db.run("CREATE TABLE IF NOT EXISTS diary_pending (account TEXT NOT NULL, date TEXT NOT NULL, PRIMARY KEY (account, date))");
+    db.run(`CREATE TABLE IF NOT EXISTS friend_requests (
+      id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE (from_id, to_id))`);
+    db.run("CREATE INDEX IF NOT EXISTS friend_requests_to ON friend_requests (to_id, created_at)");
   }
 
   /** 지금은 친구가 아니지만 예전에 메시지를 주고받은 사람 중 이름이 맞는 사람이 있나("이제 친구가 아니라서 전할 수 없어"). */
@@ -98,6 +104,62 @@ export class SocialStore {
     if (created === "limit") return { ok: false, reason: "limit" };
     if (created === "already") return { ok: false, reason: "already_friends" };
     return { ok: true, friend: this.view(this.rowFor(who, inv.owner)!) };
+  }
+
+  // ---- 친구 요청(보내기 → 대기 → 수락/거절). 대기 중인 것만 남기고, 답하면 지운다. ----
+  /** 코드 주인에게 요청을 보낸다. 같은 쌍의 대기 요청이 있으면 그것을 그대로 돌려준다(existing). */
+  sendRequest(code: string, from: string): RequestSendResult {
+    const inv = this.db.query("SELECT owner, expires_at FROM friend_invites WHERE code = ?1").get(code) as { owner: string; expires_at: number } | null;
+    if (!inv) return { ok: false, reason: "unknown_code" };
+    if (inv.expires_at <= this.clock.now()) return { ok: false, reason: "expired_code" };
+    const to = inv.owner;
+    if (to === from) return { ok: false, reason: "self" };
+    return this.db.transaction((): RequestSendResult => {
+      if (this.rowFor(from, to)) return { ok: false, reason: "already_friends" };
+      const dup = this.db.query("SELECT id, created_at FROM friend_requests WHERE from_id = ?1 AND to_id = ?2").get(from, to) as { id: string; created_at: number } | null;
+      if (dup) return { ok: true, existing: true, id: dup.id, to, createdAt: iso(dup.created_at) };
+      if (this.count(from) >= MAX_FRIENDS || this.count(to) >= MAX_FRIENDS) return { ok: false, reason: "friend_limit" };
+      const id = crypto.randomUUID();
+      const now = this.clock.now();
+      // 상대가 먼저 보낸 대기 요청이 있어도 따로 둔다(수락하면 둘 다 정리된다).
+      this.db.query("INSERT INTO friend_requests (id, from_id, to_id, created_at) VALUES (?1, ?2, ?3, ?4)").run(id, from, to, now);
+      return { ok: true, existing: false, id, to, createdAt: iso(now) };
+    }).immediate();
+  }
+
+  /** 대기 요청(받은 것·보낸 것), 최신 순. */
+  listRequests(account: string): { incoming: { id: string; fromAccount: string; createdAt: string }[]; outgoing: { id: string; toAccount: string; createdAt: string }[] } {
+    const inc = this.db.query("SELECT id, from_id, created_at FROM friend_requests WHERE to_id = ?1 ORDER BY created_at DESC, rowid DESC").all(account) as { id: string; from_id: string; created_at: number }[];
+    const out = this.db.query("SELECT id, to_id, created_at FROM friend_requests WHERE from_id = ?1 ORDER BY created_at DESC, rowid DESC").all(account) as { id: string; to_id: string; created_at: number }[];
+    return {
+      incoming: inc.map((r) => ({ id: r.id, fromAccount: r.from_id, createdAt: iso(r.created_at) })),
+      outgoing: out.map((r) => ({ id: r.id, toAccount: r.to_id, createdAt: iso(r.created_at) })),
+    };
+  }
+
+  /** 받는 사람이 수락: 요청을 지우고 서로 친구로 만든다. 한도에 걸리면 요청은 그대로 둔다. */
+  acceptRequest(id: string, who: string): { ok: true; friend: Friend; fromAccount: string } | { ok: false; reason: "not_found" | "friend_limit" } {
+    return this.db.transaction((): { ok: true; friend: Friend; fromAccount: string } | { ok: false; reason: "not_found" | "friend_limit" } => {
+      const r = this.db.query("SELECT from_id FROM friend_requests WHERE id = ?1 AND to_id = ?2").get(id, who) as { from_id: string } | null;
+      if (!r) return { ok: false, reason: "not_found" };
+      const from = r.from_id;
+      if (!this.rowFor(who, from)) {
+        if (this.count(who) >= MAX_FRIENDS || this.count(from) >= MAX_FRIENDS) return { ok: false, reason: "friend_limit" };
+        const now = this.clock.now();
+        const mk = (owner: string, friend: string) =>
+          this.db.query("INSERT INTO friends (id, owner, friend, since) VALUES (?1, ?2, ?3, ?4)").run(crypto.randomUUID(), owner, friend, now);
+        mk(who, from);
+        mk(from, who);
+      }
+      this.db.query("DELETE FROM friend_requests WHERE (from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)").run(who, from);
+      return { ok: true, friend: this.view(this.rowFor(who, from)!), fromAccount: from };
+    }).immediate();
+  }
+
+  /** 받는 사람이 거절하거나(to) 보낸 사람이 취소(from): 대기 요청이 있었으면 true. */
+  removeRequest(id: string, who: string, as: "to" | "from"): boolean {
+    const col = as === "to" ? "to_id" : "from_id";
+    return this.db.query(`DELETE FROM friend_requests WHERE id = ?1 AND ${col} = ?2`).run(id, who).changes > 0;
   }
   /** 폰 전용 계정에 친구·대화가 있나(차를 묶으면 옮겨지지 않는다는 확인 시트용). */
   phoneOnlyUsage(account: string): { friends: number; messages: number; hasData: boolean } {
@@ -273,6 +335,7 @@ export class SocialStore {
   /** 동의 철회: 일기(항목·요약·재료)와 이 계정이 보내거나 받은 친구 메시지를 모두 지운다. 친구 관계는 그대로 둔다. */
   deleteAccountData(account: string): void {
     this.db.transaction(() => {
+      this.db.query("DELETE FROM friend_requests WHERE from_id = ?1 OR to_id = ?1").run(account);
       this.db.query("DELETE FROM diary_entries WHERE account = ?1").run(account);
       this.db.query("DELETE FROM diary_summaries WHERE account = ?1").run(account);
       this.db.query("DELETE FROM diary_pending WHERE account = ?1").run(account);

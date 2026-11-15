@@ -46,7 +46,7 @@ src/
 | 경로 | 설명 |
 |---|---|
 | `GET /healthz` | 상태 확인. 외부에는 `{"ok":true}`만 노출 |
-| `POST /v1/cars/register` | 차량 등록, 차량 토큰 발급 (`X-Provision-Secret` 필요) |
+| `POST /v1/cars/register` | 차량 등록, 차량 토큰 발급 (IP별 분당 한도) |
 | `POST /v1/sessions` | 차량 토큰으로 일회용 WebSocket 티켓 발급 |
 | `POST /v1/phone-sessions` | 폰 토큰으로 일회용 WebSocket 티켓 발급 |
 | `DELETE /v1/phone-sessions/current` | 폰 로그아웃 (토큰 폐기) |
@@ -91,7 +91,6 @@ src/
 
 | 변수 | 설명 |
 |---|---|
-| `COMPANION_PROVISION_SECRET` | 필수. 차량 등록에 요구하는 비밀. 없으면 서버가 시작하지 않습니다 |
 | `LLM_PROVIDER` / `LLM_MODEL` | LLM 공급자(`anthropic`·`openai`·`gemini`·`openai-compatible`)와 모델 |
 | `LLM_BASE_URL` / `LLM_API_KEY` | OpenAI 호환 공급자의 주소와 키 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | 공급자별 키 |
@@ -119,8 +118,7 @@ git clone --recurse-submodules https://github.com/teamhey-challenge/companion-se
 cd companion-server
 bun install
 
-# 최소 설정: 등록 비밀과 LLM 키(없으면 대화 없이 서버만 뜹니다)
-export COMPANION_PROVISION_SECRET=$(openssl rand -hex 16)
+# 최소 설정: LLM 키(없으면 대화 없이 서버만 뜹니다)
 export COMPANION_TTS_PROVIDER=fake   # 외부 TTS 없이 시험
 
 bun run start                        # = bun src/index.ts, 기본 포트 8787

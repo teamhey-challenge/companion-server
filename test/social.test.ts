@@ -6,7 +6,6 @@ import { FakeTts } from "../src/tts";
 import { parseSendIntent, matchFriends } from "../src/voice-intents";
 import { friendSaid, ga } from "../src/lines";
 
-const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 50 };
 const DIARY = "오늘은 회사에 같이 다녀왔어. 중간에 쉬면서 이야기도 했어. 같이 달려서 즐거웠어.";
 let diaryFail = false;
@@ -31,7 +30,7 @@ let diaryGate: Promise<void> | null = null;
 function boot(publicPerMin = 5, clock?: Clock): Env {
   const s = createServer({
     allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
-    guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
+    guard: { trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     publicPerMin, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(), ...(clock ? { clock } : {}),
     fetchImpl: (async (_u: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
@@ -79,7 +78,7 @@ class Sock {
 }
 
 async function car(e: Env, installId: string, displayName: string) {
-  const reg = await e.j<{ carToken: string }>(await fetch(`${e.base}/v1/cars/register`, { method: "POST", headers: { "x-provision-secret": SECRET, "content-type": "application/json" }, body: JSON.stringify({ installId }) }));
+  const reg = await e.j<{ carToken: string }>(await fetch(`${e.base}/v1/cars/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ installId }) }));
   const token = reg.carToken;
   for (const type of ["record", "external_ai"]) await e.call("POST", "/v1/consents", token, { type, version: "1", granted: true, channel: "car" });
   await e.call("PATCH", "/v1/settings", token, { displayName });
@@ -740,5 +739,144 @@ describe("§6.4 trip end diary edge cases", () => {
     await stream.until(() => stream.of("diary_ready").length === 1);
     expect(stream.of("trip_done")[0]).toMatchObject({ date: startDay });
     expect((await e.j<{ summary: string }>(await e.call("GET", `/v1/diary?date=${startDay}`, phoneTok))).summary).toBe(DIARY);
+  });
+});
+
+describe("friend requests", () => {
+  const send = (e: Env, token: string, code: string) => e.call("POST", "/v1/friends/requests", token, { code });
+  type Pending = { incoming: { id: string; from: { id: string; name: string } }[]; outgoing: { id: string; to: { name: string } }[] };
+  const list = async (e: Env, token: string) => e.j<Pending>(await e.call("GET", "/v1/friends/requests", token));
+  const invite = async (e: Env, token: string) => (await e.j<{ code: string }>(await e.call("POST", "/v1/friends/invites", token))).code;
+
+  test("send -> pending -> accept makes friends, delivers frames, dedupes, accepts case/space-insensitive codes", async () => {
+    const e = boot(100);
+    const a = await car(e, "install-aaaa1", "서연");
+    const b = (await phone(e, "민수")).phoneToken;
+    const stranger = (await phone(e, "행인")).phoneToken;
+    const code = await invite(e, a);
+    const strangerSock = await inbox(e, stranger);
+    const carSock = await carSocket(e, a);
+    await Bun.sleep(50);
+    const r = await send(e, b, ` ${code.toLowerCase().slice(0, 3)} ${code.slice(3)} `);
+    expect(r.status).toBe(201);
+    const body = await e.j<{ id: string; to: { name: string }; createdAt: string }>(r);
+    expect(body.to.name).toBe("서연");
+    expect(Date.parse(body.createdAt)).toBeGreaterThan(0);
+    const again = await send(e, b, code);
+    expect(again.status).toBe(200);
+    expect((await e.j<{ id: string }>(again)).id).toBe(body.id);
+    await carSock.until(() => carSock.of("friend_request").length === 1);
+    await Bun.sleep(50);
+    expect(carSock.of("friend_request")).toEqual([{ type: "friend_request", id: body.id, fromName: "민수" }]);
+    expect(strangerSock.frames).toEqual([]);
+    const la = await list(e, a);
+    expect(la.incoming.map((x) => x.id)).toEqual([body.id]);
+    expect(la.incoming[0]!.from.name).toBe("민수");
+    expect((await list(e, b)).outgoing[0]).toMatchObject({ id: body.id, to: { name: "서연" } });
+    // 보낸 사람·제3자는 수락할 수 없다
+    expect((await e.call("POST", `/v1/friends/requests/${body.id}/accept`, b)).status).toBe(404);
+    expect((await e.call("POST", `/v1/friends/requests/${body.id}/accept`, stranger)).status).toBe(404);
+    const bSock = await inbox(e, b);
+    const acc = await e.call("POST", `/v1/friends/requests/${body.id}/accept`, a);
+    expect(acc.status).toBe(200);
+    const { friend } = await e.j<{ friend: { id: string; name: string; since: string; shareArrival: boolean } }>(acc);
+    expect(friend.name).toBe("민수");
+    expect(friend).toEqual((await friendsOf(e, a))[0]!);
+    expect((await friendsOf(e, b))[0]!.name).toBe("서연");
+    await bSock.until(() => bSock.of("friend_accepted").length === 1);
+    expect(bSock.of("friend_accepted")[0]).toEqual({ type: "friend_accepted", id: body.id, name: "서연" });
+    expect((await list(e, a)).incoming).toEqual([]);
+    expect((await e.call("POST", `/v1/friends/requests/${body.id}/accept`, a)).status).toBe(404);
+    const dupe = await send(e, b, code);
+    expect(dupe.status).toBe(409);
+    expect((await e.j<{ error: string }>(dupe)).error).toBe("already_friends");
+  });
+
+  test("decline and cancel remove the pending request; sender can resend", async () => {
+    const e = boot(100);
+    const a = await car(e, "install-aaaa1", "서연");
+    const b = (await phone(e, "민수")).phoneToken;
+    const code = await invite(e, a);
+    const id1 = (await e.j<{ id: string }>(await send(e, b, code))).id;
+    expect((await e.call("POST", `/v1/friends/requests/${id1}/decline`, b)).status).toBe(404);
+    expect((await e.call("DELETE", `/v1/friends/requests/${id1}`, a)).status).toBe(404);
+    expect((await e.call("POST", `/v1/friends/requests/${id1}/decline`, a)).status).toBe(204);
+    expect(await list(e, a)).toEqual({ incoming: [], outgoing: [] });
+    expect(await friendsOf(e, a)).toEqual([]);
+    const id2 = (await e.j<{ id: string }>(await send(e, b, code))).id;
+    expect(id2).not.toBe(id1);
+    expect((await e.call("DELETE", `/v1/friends/requests/${id2}`, b)).status).toBe(204);
+    expect((await e.call("DELETE", `/v1/friends/requests/${id2}`, b)).status).toBe(404);
+    expect((await list(e, b)).outgoing).toEqual([]);
+  });
+
+  test("errors: unknown_code, expired_code, self, bad body; lists are newest first", async () => {
+    const clock = new SkewClock();
+    const e = boot(100, clock);
+    const a = await car(e, "install-aaaa1", "서연");
+    const b = (await phone(e, "민수")).phoneToken;
+    const c = (await phone(e, "지우")).phoneToken;
+    const code = await invite(e, a);
+    const unknown = await send(e, b, "ZZZZZZ");
+    expect(unknown.status).toBe(404);
+    expect((await e.j<{ error: string }>(unknown)).error).toBe("unknown_code");
+    expect((await send(e, b, "nope")).status).toBe(404);
+    expect((await e.call("POST", "/v1/friends/requests", b, {})).status).toBe(400);
+    const self = await send(e, a, code);
+    expect(self.status).toBe(409);
+    expect((await e.j<{ error: string }>(self)).error).toBe("self");
+    const first = await e.j<{ id: string }>(await send(e, b, code));
+    clock.skew += 1000;
+    const second = await e.j<{ id: string }>(await send(e, c, code));
+    expect((await list(e, a)).incoming.map((x) => x.id)).toEqual([second.id, first.id]);
+    clock.skew += 25 * 3600_000;
+    const exp = await send(e, (await phone(e, "민아")).phoneToken, code);
+    expect(exp.status).toBe(410);
+    expect((await e.j<{ error: string }>(exp)).error).toBe("expired_code");
+  });
+
+  test("rate limit returns 429", async () => {
+    const e = boot(3);
+    const b = (await phone(e, "민수")).phoneToken;
+    const codes: number[] = [];
+    for (let i = 0; i < 6; i++) codes.push((await send(e, b, "ZZZZZZ")).status);
+    expect(codes).toContain(429);
+  });
+
+  test("friend_limit: sender or recipient at 50 → 409 friend_limit", async () => {
+    const e = boot(1000);
+    const a = await car(e, "install-aaaa1", "서연");
+    for (let i = 0; i < 50; i++) {
+      const p = await phone(e, `친구${i}`);
+      expect((await send(e, p.phoneToken, await invite(e, a))).status).toBe(201);
+    }
+    const pending = (await list(e, a)).incoming;
+    expect(pending.length).toBe(50);
+    for (const r of pending) expect((await e.call("POST", `/v1/friends/requests/${r.id}/accept`, a)).status).toBe(200);
+    expect((await friendsOf(e, a)).length).toBe(50);
+    const last = (await phone(e, "마지막")).phoneToken;
+    const lim = await send(e, last, await invite(e, a));
+    expect(lim.status).toBe(409);
+    expect((await e.j<{ error: string }>(lim)).error).toBe("friend_limit");
+    // 보내는 쪽이 50명일 때도 막힌다
+    const other = (await phone(e, "새사람")).phoneToken;
+    const rev = await send(e, a, await invite(e, other));
+    expect(rev.status).toBe(409);
+    expect((await e.j<{ error: string }>(rev)).error).toBe("friend_limit");
+  });
+
+  test("consent withdrawal purges requests in both directions", async () => {
+    const e = boot(100);
+    const a = await car(e, "install-aaaa1", "서연");
+    const b = (await phone(e, "민수")).phoneToken;
+    const c = (await phone(e, "지우")).phoneToken;
+    await send(e, b, await invite(e, a));
+    await send(e, a, await invite(e, c));
+    expect((await list(e, a)).incoming.length).toBe(1);
+    expect((await list(e, a)).outgoing.length).toBe(1);
+    expect((await e.call("DELETE", "/v1/consents/memory", a)).status).toBe(204);
+    expect(await list(e, a)).toEqual({ incoming: [], outgoing: [] });
+    expect((await list(e, b)).outgoing).toEqual([]);
+    expect((await list(e, c)).incoming).toEqual([]);
   });
 });

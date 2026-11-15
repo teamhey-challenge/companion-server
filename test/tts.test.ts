@@ -279,7 +279,7 @@ describe("server with TTS", () => {
       port: 0,
       hostname: "127.0.0.1",
       talk: { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 10 },
-      guard: { provisionSecret: "p", trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
+      guard: { trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
       observer: new Observability(() => {}),
       dbPath: ":memory:",
       tts,
@@ -288,7 +288,7 @@ describe("server with TTS", () => {
     servers.push(s);
     const base = `http://127.0.0.1:${s.port}`;
     const j = { "content-type": "application/json" };
-    const { carToken } = (await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j, "X-Provision-Secret": "p" }, body: JSON.stringify({ installId: "install-0001" }) })).json()) as { carToken: string };
+    const { carToken } = (await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j }, body: JSON.stringify({ installId: "install-0001" }) })).json()) as { carToken: string };
     for (const type of ["record", "external_ai"]) await fetch(`${base}/v1/consents`, { method: "POST", headers: { ...j, Authorization: `Bearer ${carToken}` }, body: JSON.stringify({ type, version: "1", granted: true, channel: "car" }) });
     const { wsTicket } = (await (await fetch(`${base}/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${carToken}` } })).json()) as { wsTicket: string };
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/v1/talk?ticket=${wsTicket}`);
@@ -382,7 +382,7 @@ describe("server with TTS", () => {
       port: 0,
       hostname: "127.0.0.1",
       talk: { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 10 },
-      guard: { provisionSecret: "p", trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
+      guard: { trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
       observer: new Observability((l) => lines.push(l)),
       dbPath: ":memory:",
       tts: cache,
@@ -392,7 +392,7 @@ describe("server with TTS", () => {
     servers.push(s);
     const base = `http://127.0.0.1:${s.port}`;
     const j = { "content-type": "application/json" };
-    const reg: { carToken: string } = await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j, "X-Provision-Secret": "p" }, body: JSON.stringify({ installId: "install-0002" }) })).json();
+    const reg: { carToken: string } = await (await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { ...j }, body: JSON.stringify({ installId: "install-0002" }) })).json();
     for (const type of ["record", "external_ai"]) await fetch(`${base}/v1/consents`, { method: "POST", headers: { ...j, Authorization: `Bearer ${reg.carToken}` }, body: JSON.stringify({ type, version: "1", granted: true, channel: "car" }) });
     const ses: { wsTicket: string } = await (await fetch(`${base}/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${reg.carToken}` } })).json();
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/v1/talk?ticket=${ses.wsTicket}`);

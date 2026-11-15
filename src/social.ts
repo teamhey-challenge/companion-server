@@ -95,6 +95,12 @@ export class Social {
     this.observer.event("friend.message", { spoken });
   }
 
+  /** 친구 요청 알림: 앱 안 표시만(시스템 알림·음성 없음). 차 소켓과 폰 받은편지함에 같은 프레임. */
+  notifyFriend(account: string, frame: { type: "friend_request"; id: string; fromName: string } | { type: "friend_accepted"; id: string; name: string }): void {
+    this.inbox.push(account, frame);
+    this.talkHub.pushCar(account, frame);
+  }
+
   /** 차가 연결되면 아직 못 읽어 준 메시지를 한꺼번에 밀어내지 않고 최근 몇 개만 읽어 준다. */
   replayUndelivered(account: string): void {
     for (const m of this.store.undelivered(account, this.clock.now() - UNDELIVERED_MAX_AGE_MS, REPLAY_MAX)) this.deliver(m);

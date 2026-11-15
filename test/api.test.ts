@@ -14,7 +14,6 @@ class FakeClock implements Clock {
   clearTimeout() {}
 }
 
-const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 10 };
 let servers: RunningServer[] = [];
 afterEach(() => { for (const s of servers) void s.stop(true); servers = []; });
@@ -29,7 +28,7 @@ function boot(publicPerMin = 100) {
   const dbPath = `${mkdtempSync(`${tmpdir()}/api-`)}/c.db`;
   const s = createServer({
     allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath, clock, publicPerMin,
-    guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 1000 },
+    guard: { trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 1000 },
     hub: { pushSettings: (id, st) => pushed.push([id, st]), pushPairing: (id, st) => pairingPushed.push([id, st]) },
   });
   servers.push(s);
@@ -41,7 +40,7 @@ function boot(publicPerMin = 100) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   const car = async (installId: string) => {
-    const res = await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { "x-provision-secret": SECRET, "content-type": "application/json" }, body: JSON.stringify({ installId }) });
+    const res = await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ installId }) });
     const j: { carToken: string } = await res.json();
     return j.carToken;
   };

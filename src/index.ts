@@ -13,7 +13,6 @@ const observer = new Observability(makeLogWriter(process.env.COMPANION_LOG_FILE 
 const cfg = loadTalkConfig();
 if (!cfg.apiKey) observer.error("config.no_key", cfg.providerName);
 const guard = loadGuardConfig();
-if (guard.provisionSecret === undefined) observer.error("config.no_auth", "COMPANION_ALLOW_NO_AUTH=1");
 const dbPath = `${process.env.COMPANION_DATA_DIR || "./data"}/companion.sqlite`;
 const ttsCfg = loadTtsConfig();
 const tts = makeTts(ttsCfg, observer);
