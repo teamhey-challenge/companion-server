@@ -5,7 +5,6 @@ import { cleanOnboardingAnswer, CONSENT_FREE_STEPS, HEYRI_LINES, ONBOARDING_STEP
 import { createServer, type RunningServer } from "../src/server";
 import { FakeTts, loadTtsConfig, makeTts } from "../src/tts";
 
-const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 50 };
 const GREETING = "민수야 반가워! 회사 얘기 좋아해?";
 
@@ -38,7 +37,7 @@ function boot(o: BootOpts = {}): Boot {
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:", tts,
     ...(o.ackFirstMs !== undefined ? { onboardingAckFirstMs: o.ackFirstMs } : {}),
-    guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
+    guard: { trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     fetchImpl: (async (_u: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
       const system = body.messages[0]!.content;
@@ -62,7 +61,7 @@ class Car {
     };
   }
   static async connect(b: Boot): Promise<Car> {
-    const reg = await fetch(`${b.base}/v1/cars/register`, { method: "POST", headers: { "x-provision-secret": SECRET, "content-type": "application/json" }, body: JSON.stringify({ installId: "install-ob01" }) });
+    const reg = await fetch(`${b.base}/v1/cars/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ installId: "install-ob01" }) });
     const { carToken } = (await reg.json()) as { carToken: string };
     const ses = await fetch(`${b.base}/v1/sessions`, { method: "POST", headers: { authorization: `Bearer ${carToken}` } });
     const { wsTicket } = (await ses.json()) as { wsTicket: string };

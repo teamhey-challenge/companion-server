@@ -3,7 +3,7 @@ import { Social, type DiaryLlm } from "./social";
 import { getProvider, streamLlm } from "./llm/providers";
 import { handleApi } from "./api";
 import { ApiStore } from "./api-store";
-import { bearer, clientIp, isLocalRequest, safeEqual, type GuardConfig } from "./auth";
+import { bearer, clientIp, isLocalRequest, type GuardConfig } from "./auth";
 import { SystemClock, type Clock } from "./clock";
 import type { Observability } from "./observe";
 import { RateLimiter } from "./rate-limit";
@@ -57,7 +57,7 @@ const json = (body: unknown, status = 200) => Response.json(body, { status });
 
 /**
  * /healthz, POST /v1/cars/register, POST /v1/sessions, WS /v1/talk?ticket=.
- * 등록은 프로비전 비밀(X-Provision-Secret), 세션은 carToken(Bearer), 웹소켓은 한 번 쓰는 짧은 티켓으로만 연다.
+ * 세션은 carToken(Bearer), 웹소켓은 한 번 쓰는 짧은 티켓으로만 연다. 등록은 열려 있고 IP별 분당 한도만 있다.
  */
 export function createServer(o: ServerOptions): RunningServer {
   const clock = o.clock ?? new SystemClock();
@@ -90,11 +90,6 @@ export function createServer(o: ServerOptions): RunningServer {
   };
 
   async function register(req: Request): Promise<Response> {
-    const given = req.headers.get("x-provision-secret") ?? "";
-    if (o.guard.provisionSecret !== undefined && !safeEqual(given, o.guard.provisionSecret)) {
-      o.observer.reject("register.forbidden");
-      return json({ error: "forbidden" }, 403);
-    }
     const body = (await req.json().catch(() => null)) as { installId?: unknown } | null;
     const id = body?.installId;
     if (typeof id !== "string" || !INSTALL_ID.test(id)) return json({ error: "bad_request" }, 400);

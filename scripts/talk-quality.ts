@@ -25,11 +25,10 @@ const scenarios = all.filter((c) => !only || only.includes(c.id));
 
 const talk = loadTalkConfig();
 if (!talk.apiKey) throw new Error("no LLM key");
-const SECRET = "eval-provision";
 const dbPath = join(tmpdir(), `talk-quality-${process.pid}.sqlite`);
 const server = createServer({
   port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath,
-  guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 10_000, turnsPerDay: 100_000, upgradesPerMin: 10_000, httpPerMin: 10_000 },
+  guard: { trustProxy: false, turnsPerMin: 10_000, turnsPerDay: 100_000, upgradesPerMin: 10_000, httpPerMin: 10_000 },
   tts: null,
 });
 const base = `http://127.0.0.1:${server.port}`;
@@ -55,7 +54,7 @@ async function runScenario(sc: TalkScenario, n: number): Promise<TurnRow[]> {
   const installId = `tq-install-${String(n).padStart(4, "0")}`;
   const call = (method: string, path: string, headers: Record<string, string>, body?: unknown) =>
     fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const { carToken } = (await (await call("POST", "/v1/cars/register", { "x-provision-secret": SECRET }, { installId })).json()) as { carToken: string };
+  const { carToken } = (await (await call("POST", "/v1/cars/register", {}, { installId })).json()) as { carToken: string };
   const auth = { authorization: `Bearer ${carToken}` };
   for (const type of ["record", "external_ai", "memory"]) await call("POST", "/v1/consents", auth, { type, version: "1", granted: true, channel: "car" });
   await call("PATCH", "/v1/settings", auth, { speech: sc.speech });
