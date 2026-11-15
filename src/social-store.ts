@@ -69,16 +69,17 @@ export class SocialStore {
     if (!inv) return { ok: false, reason: "unknown" };
     if (inv.expires_at <= this.clock.now()) return { ok: false, reason: "expired" };
     if (inv.owner === who) return { ok: false, reason: "self" };
-    const existing = this.rowFor(who, inv.owner);
-    if (existing) return { ok: true, friend: this.view(existing) };
-    if (this.count(who) >= MAX_FRIENDS || this.count(inv.owner) >= MAX_FRIENDS) return { ok: false, reason: "limit" };
     const now = this.clock.now();
     const mk = (owner: string, friend: string) =>
       this.db.query("INSERT INTO friends (id, owner, friend, since) VALUES (?1, ?2, ?3, ?4)").run(crypto.randomUUID(), owner, friend, now);
-    this.db.transaction(() => {
+    const created = this.db.transaction((): boolean => {
+      if (this.rowFor(who, inv.owner)) return true;
+      if (this.count(who) >= MAX_FRIENDS || this.count(inv.owner) >= MAX_FRIENDS) return false;
       mk(who, inv.owner);
       mk(inv.owner, who);
-    })();
+      return true;
+    }).immediate();
+    if (!created) return { ok: false, reason: "limit" };
     return { ok: true, friend: this.view(this.rowFor(who, inv.owner)!) };
   }
 

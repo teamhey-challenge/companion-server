@@ -186,17 +186,23 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     if (b.channel !== "car" && b.channel !== "phone") return bad();
     // 채널은 토큰 종류와 일치해야 한다
     if ((b.channel as ConsentChannel) !== who.kind) return bad("channel_mismatch");
-    d.api.setConsent(installId, b.type as ConsentType, b.version, b.granted);
-    // D-53: 기억·녹음 동의 철회는 일기와 친구 메시지도 바로 지운다.
-    if (!b.granted && (b.type === "record" || b.type === "memory")) d.social.store.deleteAccountData(installId);
+    const purge = !b.granted && (b.type === "record" || b.type === "memory");
+    d.api.atomically(() => {
+      d.api.setConsent(installId, b.type as ConsentType, b.version as string, b.granted as boolean);
+      // D-53: 기억·녹음 동의 철회는 일기와 친구 메시지도 바로 지운다.
+      if (purge) d.social.store.deleteAccountData(installId);
+    });
     d.consentChanged?.(installId, !b.granted);
     return json({ consents: d.api.listConsents(installId) });
   }
   const consent = /^\/v1\/consents\/([^/]+)$/.exec(path);
   if (consent && m === "DELETE") {
     if (!(CONSENT_TYPES as readonly string[]).includes(consent[1]!)) return bad();
-    d.api.withdrawConsent(installId, consent[1] as ConsentType);
-    if (consent[1] === "record" || consent[1] === "memory") d.social.store.deleteAccountData(installId);
+    const type = consent[1] as ConsentType;
+    d.api.atomically(() => {
+      d.api.withdrawConsent(installId, type);
+      if (type === "record" || type === "memory") d.social.store.deleteAccountData(installId);
+    });
     d.consentChanged?.(installId, true);
     return noContent();
   }

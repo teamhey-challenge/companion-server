@@ -8,9 +8,10 @@ export interface SendIntent {
   text: string;
 }
 
-const VERB = "(?:전해\\s*줘|전해줘|전해\\s*줄래|전해\\s*주세요|말해\\s*줘|말해줘|보내\\s*줘|보내줘|알려\\s*줘|알려줘)";
-const WITH_NAME = new RegExp(`^(.{1,12}?)\\s*(?:한테|에게|께)\\s+(.+?)\\s*${VERB}\\s*[.!?]*$`);
+const VERB = "(?:전해\\s*줘|전해\\s*줄래|전해\\s*줄까|전해\\s*주세요|전해\\s*주라|전해\\s*달라(?:고)?)";
+const WITH_NAME = new RegExp(`^(.{1,12}?)\\s*(?:한테|에게|께)\\s*(.+?)\\s*${VERB}\\s*[.!?]*$`);
 const NO_NAME = new RegExp(`^(.{1,60}?)\\s*${VERB}\\s*[.!?]*$`);
+const PRONOUN = /^(?:나|저|내|너|우리)$/u;
 
 /** "늦는다고" → "늦는다", "고맙다고" → "고마워!" */
 function cleanBody(raw: string): string {
@@ -23,7 +24,9 @@ export function parseSendIntent(text: string): SendIntent | null {
   const named = WITH_NAME.exec(t);
   if (named) {
     const body = cleanBody(named[2]!);
-    return body ? { name: named[1]!.trim(), text: body } : null;
+    const name = named[1]!.trim();
+    if (PRONOUN.test(name)) return null;
+    return body ? { name, text: body } : null;
   }
   const plain = NO_NAME.exec(t);
   if (plain) {
@@ -42,5 +45,6 @@ export function matchFriends<T extends { name: string }>(spoken: string, friends
   if (!n) return [];
   const exact = friends.filter((f) => f.name === spoken.trim() || f.name === n);
   if (exact.length) return exact;
+  if (n.length < 2) return [];
   return friends.filter((f) => f.name.includes(n) || n.includes(f.name));
 }

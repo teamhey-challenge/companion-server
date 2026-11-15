@@ -859,7 +859,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       social.arrived(d.installId);
     }
     if (cur.gear !== "P") return;
-    const doorOpened = (cur.driverDoorOpen === true && prev.driverDoorOpen !== true) || (cur.doorOpen === true && prev.doorOpen !== true);
+    // 운전석 문 신호가 ctx 에 있으면 그것만 본다. 없을 때만 아무 문(doorOpen)으로 대신한다.
+    const doorOpened =
+      cur.driverDoorOpen !== undefined
+        ? cur.driverDoorOpen === true && prev.driverDoorOpen !== true
+        : cur.doorOpen === true && prev.doorOpen !== true;
     if (doorOpened) return void endTrip(ws);
     // 문 열림을 못 봐도 P 를 60초 두면 끝난 것으로 본다.
     if (!c.tripHold) c.tripHold = clock.setTimeout(() => {
@@ -875,7 +879,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (c.tripHold) clock.clearTimeout(c.tripHold);
     c.tripHold = undefined;
     const place = c.tripPlace ?? null;
-    if (!c.arrivedSent && place) opts.social.arrived(ws.data.installId);
+    if (!c.arrivedSent) opts.social.arrived(ws.data.installId);
     c.arrivedSent = true;
     opts.social.tripDone(ws.data.installId, place);
   }
