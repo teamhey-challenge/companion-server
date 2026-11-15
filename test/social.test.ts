@@ -30,7 +30,7 @@ let diaryGate: Promise<void> | null = null;
 
 function boot(publicPerMin = 5, clock?: Clock): Env {
   const s = createServer({
-    allowNonGoogleClaim: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
+    allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     publicPerMin, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(), ...(clock ? { clock } : {}),
     fetchImpl: (async (_u: string, init: RequestInit) => {

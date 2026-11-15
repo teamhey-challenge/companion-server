@@ -47,6 +47,8 @@ export interface ApiDeps {
   pushLinked?: (installId: string, googleName: string | null) => void;
   /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결(claim)도 받는다. 운영은 꺼 둔다(D-57). */
   allowNonGoogleClaim?: boolean;
+  /** 시험 전용(COMPANION_ALLOW_PHONE_ONLY=1): 차 없는 폰 전용 계정을 등록·사용할 수 있다. 운영은 끈다(D-58). */
+  allowPhoneOnly?: boolean;
   /** 동의가 바뀌면 그 차의 열린 소켓이 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
   consentChanged?: (installId: string, withdrawn: boolean) => void;
   /** 공개 엔드포인트(코드 조회·claim) 열거 방지용 IP별 제한. true면 거절. */
@@ -131,6 +133,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     return json(d.api.googleLogin(v.claims.sub, v.claims.givenName));
   }
   if (path === "/v1/phones/register" && m === "POST") {
+    if (!d.allowPhoneOnly) return err("car_link_required", 403);
     if (d.throttled(ip, "phreg", d.publicPerMin)) return err("rate_limited", 429);
     const b = await readJson(req);
     const name = isObj(b) && typeof b.displayName === "string" ? b.displayName.trim() : "";
@@ -176,6 +179,17 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   }
   const { installId } = who;
   const carOnly = (): Response | null => (who.kind === "car" ? null : json({ error: "forbidden" }, 403));
+  // D-58: 차와 연결되지 않은 폰 토큰(폰 전용 계정)은 계정 조회·동의·연결 해제만 쓴다(연결 claim 은 토큰 없는 공개 경로에서 처리).
+  if (who.kind === "phone" && installId.startsWith("ph_") && !d.allowPhoneOnly) {
+    const open =
+      (path === "/v1/account" && m === "GET") ||
+      (/^\/v1\/consents(\/|$)/.test(path) && (m === "GET" || m === "POST" || m === "DELETE")) ||
+      (path === "/v1/pairings/current" && m === "DELETE");
+    if (!open) {
+      d.reject("api.car_link_required");
+      return err("car_link_required", 403);
+    }
+  }
 
   if (path === "/v1/phone-sessions" && m === "POST") {
     if (who.kind !== "phone") return json({ error: "forbidden" }, 403);
@@ -300,6 +314,7 @@ async function handleSocial(req: Request, url: URL, path: string, m: string, me:
   if (accept && m === "POST") {
     const code = accept[1]!.toUpperCase();
     if (!INVITE_CODE_RE.test(code)) return err("unknown", 404);
+    if (!d.allowPhoneOnly && s.store.inviteOwner(code)?.startsWith("ph_")) return err("unknown", 404);
     const r = s.store.acceptInvite(code, me);
     if (!r.ok) return err(r.reason, r.reason === "unknown" ? 404 : r.reason === "expired" ? 410 : r.reason === "self" ? 400 : 409);
     return json({ friend: r.friend });

@@ -27,7 +27,7 @@ async function sign(priv: CryptoKey, kid: string, payload: Record<string, unknow
   return `${head}.${sig}`;
 }
 
-async function boot(opts: { configured?: boolean; publicPerMin?: number } = {}) {
+async function boot(opts: { configured?: boolean; publicPerMin?: number; allowPhoneOnly?: boolean } = {}) {
   const clock = new FakeClock();
   const logs: string[] = [];
   const kp = await keyPair();
@@ -40,7 +40,7 @@ async function boot(opts: { configured?: boolean; publicPerMin?: number } = {}) 
   }) as unknown as typeof fetch;
   const dbPath = `${mkdtempSync(`${tmpdir()}/gauth-`)}/c.db`;
   const s = createServer({
-    port: 0, hostname: "127.0.0.1", talk, observer: new Observability((l) => logs.push(String(l))), dbPath, clock, publicPerMin: opts.publicPerMin ?? 100,
+    port: 0, hostname: "127.0.0.1", talk, observer: new Observability((l) => logs.push(String(l))), dbPath, clock, publicPerMin: opts.publicPerMin ?? 100, allowPhoneOnly: opts.allowPhoneOnly ?? false,
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 1000 },
     googleClientId: opts.configured === false ? undefined : CLIENT, googleFetch,
   });
@@ -67,17 +67,54 @@ async function boot(opts: { configured?: boolean; publicPerMin?: number } = {}) 
 }
 
 describe("POST /v1/auth/google", () => {
-  test("valid token creates a phone-only account named by given_name; logging in again returns the same one", async () => {
+  test("valid token returns an unlinked phone token named by given_name; logging in again returns the same one; only claim/account/consents/unpair are open (D-58)", async () => {
     const e = await boot();
     const a = await e.login("sub-aaa");
     expect(a.res.status).toBe(200);
     expect(a.body).toMatchObject({ displayName: "지은", linkedCar: false, isNew: true });
-    expect(a.body.accountId).toMatch(/^ph_/);
-    expect(((await (await e.call("GET", "/v1/settings", a.body.phoneToken)).json()) as { displayName: string }).displayName).toBe("지은");
+    const t = a.body.phoneToken;
+    const acc = await e.call("GET", "/v1/account", t);
+    expect(acc.status).toBe(200);
+    expect(await acc.json()).toMatchObject({ linkedCar: false });
+    expect((await e.call("GET", "/v1/consents", t)).status).toBe(200);
+    expect((await e.call("POST", "/v1/consents", t, { type: "record", version: "1", granted: true, channel: "phone" })).status).toBe(200);
+    const blocked: [string, string, unknown?][] = [
+      ["POST", "/v1/phone-sessions"], ["GET", "/v1/settings"], ["PATCH", "/v1/settings", { speech: "warm" }], ["GET", "/v1/memory"], ["DELETE", "/v1/memory"],
+      ["GET", "/v1/friends"], ["POST", "/v1/friends/invites"], ["POST", "/v1/friends/invites/ABCDEFGH/accept"], ["GET", "/v1/messages"], ["POST", "/v1/messages", { toFriendId: "x", text: "hi" }], ["GET", "/v1/diary"],
+    ];
+    for (const [m, p, body] of blocked) {
+      const r = await e.call(m, p, t, body);
+      expect([m, p, r.status]).toEqual([m, p, 403]);
+      expect(((await r.json()) as { code: string }).code).toBe("car_link_required");
+    }
     const b = await e.login("sub-aaa");
     expect(b.body).toMatchObject({ accountId: a.body.accountId, isNew: false, linkedCar: false });
-    expect((await e.call("GET", "/v1/settings", b.body.phoneToken)).status).toBe(200);
     expect(e.served.fetches).toBe(1);
+  });
+
+  test("linked phone works as before; unpair returns to car_link_required", async () => {
+    const e = await boot();
+    const g = await e.login("sub-lnk");
+    expect((await e.claim(await e.car("install-lnk01"), g.body.phoneToken)).res.status).toBe(200);
+    const l = await e.login("sub-lnk");
+    for (const p of ["/v1/settings", "/v1/memory", "/v1/friends", "/v1/messages", "/v1/diary"]) expect([p, (await e.call("GET", p, l.body.phoneToken)).status]).toEqual([p, 200]);
+    expect((await e.call("POST", "/v1/phone-sessions", l.body.phoneToken)).status).toBe(200);
+    expect((await e.call("DELETE", "/v1/pairings/current", l.body.phoneToken)).status).toBe(204);
+    const after = await e.login("sub-lnk");
+    expect((await e.call("GET", "/v1/friends", after.body.phoneToken)).status).toBe(403);
+  });
+
+  test("friend invite between two car accounts works", async () => {
+    const e = await boot();
+    const a = await e.login("sub-fa");
+    const b = await e.login("sub-fb");
+    await e.claim(await e.car("install-fa001"), a.body.phoneToken);
+    await e.claim(await e.car("install-fb001"), b.body.phoneToken);
+    const ta = (await e.login("sub-fa")).body.phoneToken;
+    const tb = (await e.login("sub-fb")).body.phoneToken;
+    const inv = (await (await e.call("POST", "/v1/friends/invites", ta)).json()) as { code: string };
+    expect((await e.call("POST", `/v1/friends/invites/${inv.code}/accept`, tb)).status).toBe(200);
+    expect(((await (await e.call("GET", "/v1/friends", tb)).json()) as { friends?: unknown[] }).friends?.length ?? 1).toBeGreaterThan(0);
   });
 
   test("rejects wrong aud, wrong iss, expired, bad signature, wrong alg and garbage", async () => {
@@ -114,7 +151,9 @@ describe("POST /v1/auth/google", () => {
     const r = await e.call("POST", "/v1/auth/google", undefined, { idToken: "x" });
     expect(r.status).toBe(503);
     expect(((await r.json()) as { code: string }).code).toBe("google_login_unconfigured");
-    expect((await e.call("POST", "/v1/phones/register", undefined, { displayName: "a" })).status).toBe(200);
+    expect((await e.call("POST", "/v1/phones/register", undefined, { displayName: "a" })).status).toBe(403);
+    const f = await boot({ configured: false, allowPhoneOnly: true });
+    expect((await f.call("POST", "/v1/phones/register", undefined, { displayName: "a" })).status).toBe(200);
   });
 
   test("is IP rate limited", async () => {
@@ -165,7 +204,7 @@ describe("linking a car", () => {
     const noToken = await e.claim(carToken);
     expect(noToken.res.status).toBe(403);
     expect(noToken.body.code).toBe("google_login_required");
-    const phoneOnly = (await (await e.call("POST", "/v1/phones/register", undefined, { displayName: "민수" })).json()) as { phoneToken: string };
+    const phoneOnly = (await (await (await boot({ allowPhoneOnly: true })).call("POST", "/v1/phones/register", undefined, { displayName: "민수" })).json()) as { phoneToken: string };
     const nonGoogle = await e.claim(carToken, phoneOnly.phoneToken);
     expect(nonGoogle.res.status).toBe(403);
     expect(nonGoogle.body.code).toBe("google_login_required");

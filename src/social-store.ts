@@ -73,6 +73,12 @@ export class SocialStore {
     throw new Error("invite code generation failed");
   }
 
+  /** 초대 코드를 만든 계정(없거나 지났으면 null). */
+  inviteOwner(code: string): string | null {
+    const r = this.db.query("SELECT owner FROM friend_invites WHERE code = ?1 AND expires_at > ?2").get(code, this.clock.now()) as { owner: string } | null;
+    return r?.owner ?? null;
+  }
+
   /** 초대를 받아들이면 서로 친구가 된다. 이미 친구면 그대로 돌려준다. 코드는 24시간 안에 여러 번 쓸 수 있다(여러 친구에게 같은 링크). */
   acceptInvite(code: string, who: string): AcceptResult {
     const inv = this.db.query("SELECT owner, expires_at FROM friend_invites WHERE code = ?1").get(code) as { owner: string; expires_at: number } | null;

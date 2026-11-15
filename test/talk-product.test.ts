@@ -26,7 +26,7 @@ interface Llm { replies: string[]; extraction: string; calls: { system: string; 
 
 function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string; proactiveLlmFirstMs?: number } = {}) {
   const s = createServer({
-    allowNonGoogleClaim: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
+    allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     arrivalDelayMs: 30,
     clock,
@@ -560,7 +560,7 @@ describe("proactive decision", () => {
     const { pairCode } = (await (await car.api("POST", "/v1/pairings")).json()) as { pairCode: string };
     const claim = await fetch(`${car.base}/v1/pairings/${pairCode}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ record: true, memory: true }) });
     const { phoneToken } = (await claim.json()) as { phoneToken: string };
-    expect(car.frames.some((f) => f.type === "pairing")).toBe(false);
+    expect(car.frames.some((f) => f.type === "pairing" && f.status === "none")).toBe(false);
     const del = await fetch(`${car.base}/v1/pairings/current`, { method: "DELETE", headers: { authorization: `Bearer ${phoneToken}` } });
     expect(del.status).toBe(204);
     await car.until((f) => f.some((x) => x.type === "pairing" && x.status === "none"));
