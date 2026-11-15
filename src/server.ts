@@ -46,9 +46,9 @@ export interface ServerOptions {
   googleClientId?: string;
   /** 구글 공개키(JWKS) 요청용 fetch. 시험에서만 바꾼다. */
   googleFetch?: typeof fetch;
-  /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결도 받는다. 운영은 끈다(D-57). */
+  /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결도 받는다. 운영은 끈다. */
   allowNonGoogleClaim?: boolean;
-  /** 시험 전용(COMPANION_ALLOW_PHONE_ONLY=1): 폰 전용 계정을 허용한다. 운영은 끈다(D-58). */
+  /** 시험 전용(COMPANION_ALLOW_PHONE_ONLY=1): 폰 전용 계정을 허용한다. 운영은 끈다. */
   allowPhoneOnly?: boolean;
 }
 

@@ -138,7 +138,7 @@ async function readyCar(llm: Llm, tts = false) {
 const proactives = (car: Car) => car.frames.filter((f) => f.type === "proactive");
 const drive = { gear: "D", speedKmh: 40, naviGuiding: false };
 
-describe("sentence cap (PLEOS-125)", () => {
+describe("sentence cap", () => {
   const long = "오늘 날씨 좋다. 같이 드라이브하니까 기분 좋아. 점심은 뭐 먹을까? 국밥도 좋고 떡볶이도 좋아. 어떤 게 땡겨? 말해 줘!";
   const park = { gear: "P", speedKmh: 0 };
 
@@ -190,7 +190,7 @@ describe("sentence cap (PLEOS-125)", () => {
   });
 });
 
-describe("output filter: lectures and things the app cannot do (PLEOS-125)", () => {
+describe("output filter: lectures and things the app cannot do", () => {
   test("checkOutput classifies lecture / cant-do / ok", () => {
     expect(checkOutput("비 오니까 천천히 가자.", true)).toBe("drop");
     expect(checkOutput("안전운전 해!", true)).toBe("drop");
@@ -246,7 +246,7 @@ describe("SentenceCap unit", () => {
   });
 });
 
-describe("LLM deadline (PLEOS-134)", () => {
+describe("LLM deadline", () => {
   test("a stream that stalls after the first token ends the turn with error llm_failed and the next turn is accepted", async () => {
     const car = await Car.connect(boot(newLlm(), false, undefined, { llmDeadlineMs: 150, stall: true }));
     await car.grantTalk();
@@ -311,7 +311,7 @@ describe("proactive decision", () => {
     car.close();
   });
 
-  test("D-47 rule 11: a low range alone says nothing (no fuel/range nagging)", async () => {
+  test("rule 11: a low range alone says nothing (no fuel/range nagging)", async () => {
     const car = await readyCar(newLlm());
     car.ctx({ gear: "N", speedKmh: 0 });
     car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: 10 });
@@ -419,7 +419,7 @@ describe("proactive decision", () => {
     next.close();
   });
 
-  describe("H1: memory-based arrival and first-boarding lines (PLEOS-167)", () => {
+  describe("H1: memory-based arrival and first-boarding lines", () => {
     const ARRIVE = "도착했네! 오늘 면접 잘 보고 와, 끝나고 어땠는지 알려 줘!";
     const ASK = "어제 면접 어땠어?";
     const park = { gear: "P", speedKmh: 0 };
@@ -532,7 +532,7 @@ describe("proactive decision", () => {
       next.close();
     });
 
-    test("D-14: navi guiding -> no arrival line at all, memory or not", async () => {
+    test("navi guiding -> no arrival line at all, memory or not", async () => {
       const llm = newLlm();
       llm.proactive = () => ARRIVE;
       const { b } = await carWithFact(llm);
@@ -554,7 +554,7 @@ describe("proactive decision", () => {
     car.close();
   });
 
-  test("PLEOS-158: a phone unpair pushes a pairing(none) frame to the car's open socket", async () => {
+  test("a phone unpair pushes a pairing(none) frame to the car's open socket", async () => {
     const car = await readyCar(newLlm());
     const { pairCode } = (await (await car.api("POST", "/v1/pairings")).json()) as { pairCode: string };
     const claim = await fetch(`${car.base}/v1/pairings/${pairCode}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ record: true, memory: true }) });
@@ -583,7 +583,7 @@ describe("memory", () => {
     car.close();
   });
 
-  test("PLEOS-174: the same sentence extracted again (even as another kind) is not stored twice", async () => {
+  test("the same sentence extracted again (even as another kind) is not stored twice", async () => {
     const llm = newLlm();
     llm.extraction = "FACT: 퇴근길에는 조용한 대화를 좋아해요";
     const car = await readyCar(llm);
@@ -667,8 +667,8 @@ describe("memory", () => {
   });
 });
 
-describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
-  test("withdrawing external_ai cancels the in-flight turn at once (PLEOS-135)", async () => {
+describe("consent gate (AC-4.9-05)", () => {
+  test("withdrawing external_ai cancels the in-flight turn at once", async () => {
     const car = await Car.connect(boot(newLlm(), false, undefined, { llmDeadlineMs: 60_000, stall: true }));
     await car.grantTalk();
     car.send({ type: "turn.start", turnId: "w1", trigger: "ptt" });
@@ -682,7 +682,7 @@ describe("consent gate (AC-4.9-05, PLEOS-135)", () => {
     car.close();
   });
 
-  test("withdrawing record clears the pending arrival timer: it never speaks (PLEOS-135)", async () => {
+  test("withdrawing record clears the pending arrival timer: it never speaks", async () => {
     const real = new SystemClock();
     const pending = new Map<number, () => void>();
     let next = 1;

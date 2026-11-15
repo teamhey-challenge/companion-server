@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * 시연용 기억 넣기(PLEOS-167). 라이브 추출에 기대지 않고 H1("어제 한 말을 기억해서 먼저 꺼낸다") 장면을 만든다.
+ * 시연용 기억 넣기. 라이브 추출에 기대지 않고 H1("어제 한 말을 기억해서 먼저 꺼낸다") 장면을 만든다.
  * 서버가 쓰는 것과 같은 저장소(ApiStore.addMemory)로 기억 한 줄(FACT)만 쓴다. 대화 원문은 저장하지 않는다.
  *
  *   bun scripts/seed-memory.ts --car <installId|current-audit-car> --fact '오늘 면접 보러 간다' [--when yesterday|today|<N>d|<ISO>] [--reset-greeting] [--db <path>]

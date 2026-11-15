@@ -51,7 +51,7 @@ export function indirectQuote(text: string, s: SpeechStyle): string {
 export const friendSaid = (name: string, text: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `${name}님이 그러는데요, ${indirectQuote(text, s)}` : `${ga(name)} 그러는데, ${indirectQuote(text, s)}`;
 
-/** 친구가 도착을 알렸을 때(D-53: 장소 이름은 절대 넣지 않는다). */
+/** 친구가 도착을 알렸을 때(장소 이름은 절대 넣지 않는다). */
 export const friendArrivedLine = (name: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `${name}님이 도착했대요!` : `${ga(name)} 도착했대!`;
 
@@ -97,7 +97,7 @@ export const L = {
   wiper: pair("비 오네! 우산 챙겼어?", "비가 오네요! 우산 챙기셨어요?"),
   headlight: pair("벌써 밖이 어두워졌네. 오늘 하루도 고생 많았어!", "벌써 밖이 어두워졌네요. 오늘 하루도 고생 많으셨어요!"),
   door: pair("어, 누가 탔네? 반가워, 난 헤이리야!", "어, 누가 타셨네요? 반가워요, 저는 헤이리예요!"),
-  // D-47 규칙 11: 연료·거리 경고 없이 가볍게(수치 없음)
+  // 규칙 11: 연료·거리 경고 없이 가볍게(수치 없음)
   longTripEv: pair("멀리 가니까 언젠가 충전해야겠네~", "멀리 가니까 언젠가 충전해야겠네요~"),
   longTripIce: pair("멀리 가니까 언젠가 주유해야겠네~", "멀리 가니까 언젠가 주유해야겠네요~"),
   longTripLpg: pair("멀리 가니까 언젠가 충전소 들러야겠네~", "멀리 가니까 언젠가 충전소 들러야겠네요~"),

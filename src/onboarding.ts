@@ -5,7 +5,7 @@ import { answerNickname } from "./intents";
 import { messageBlocked } from "./social";
 
 /**
- * 온보딩(D-48): 고래가 세계관·질문을 하고(고래 목소리), 헤이리가 첫 인사·기억·꾸미기·QR·마무리를 말한다(헤이리 목소리).
+ * 온보딩: 고래가 세계관·질문을 하고(고래 목소리), 헤이리가 첫 인사·기억·꾸미기·QR·마무리를 말한다(헤이리 목소리).
  * 프레임은 /v1/talk 위에서 오간다(companion-shared 에 아직 없는 타입이라 talk.ts 가 parseClientFrame 앞에서 걸러 낸다).
  *  앱→서버 {type:"onboarding", step}          그 단계를 지금 말해 줘
  *  앱→서버 {type:"onboarding.answer", step, text, reply?}   q1~q3 의 말로 한 답(STT 문장). reply:true 면 서버가 고래 맞장구(못 알아들었으면 skip 대사)까지 말한다
@@ -61,7 +61,7 @@ export function ackInstruction(step: QuestionStep, answer: string): string {
   return `너는 빛바다를 지키는 고래 안내자다. 운전자가 ${what}을(를) 이렇게 말했다: "${answer}". 이를 받아 20자 안팎의 짧은 반말 한 문장으로 맞장구만 친다. 질문은 하지 않고, 말하지 않은 건 지어내지 않는다. "NONE"은 쓰지 않는다.`;
 }
 
-/** 고정 대사를 TTS 조각으로 잘라 돌려준다(말할 때의 조각과 같아야 캐시가 맞는다). 캐시는 서버 메모리뿐이다(D-35). */
+/** 고정 대사를 TTS 조각으로 잘라 돌려준다(말할 때의 조각과 같아야 캐시가 맞는다). 캐시는 서버 메모리뿐이다. */
 export function onboardingPieces(): string[] {
   const out = new Set<string>();
   for (const text of [...Object.values(WHALE_LINES), ...Object.values(HEYRI_LINES).flatMap((p) => [p.banmal, p.jondaetmal])]) {

@@ -1,5 +1,5 @@
 /**
- * 기억 추출 평가(PLEOS-167). 서버가 쓰는 프롬프트(buildExtractRequest)와 파서(parseExtraction)를 그대로 써서
+ * 기억 추출 평가. 서버가 쓰는 프롬프트(buildExtractRequest)와 파서(parseExtraction)를 그대로 써서
  * 발화마다 무엇이 저장되는지 표로 낸다. 15문장(MemoryLive extract15)과 계획 문장 5개, 저장되면 안 되는 5개를 같은 차의 누적 기억으로 돌린다.
  *   bun scripts/extract-eval.ts [--runs 1]   (LLM 키는 ~/.config/companion/server.env 에서만 읽고 출력하지 않는다)
  * 종료 코드: 저장돼야 할 문장(expect=store)이 비었거나, 저장되면 안 되는 문장(expect=none)이 저장되면 1.

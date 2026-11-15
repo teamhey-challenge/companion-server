@@ -30,7 +30,7 @@ export function normalizeMemoryText(text: string): string {
 export const CHARACTER_NAME = "헤이리";
 const MAX_EVENTS_PER_CAR = 200;
 
-/** 꾸미기(D-41). Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니(기본: 지금 보이는 모습)·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
+/** 꾸미기. Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니(기본: 지금 보이는 모습)·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
 export interface Look { bodyColor: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1 }
 export const LOOK_MAX = { bodyColor: 1, hat: 2, neck: 1 } as const;
 export type ServerSettings = Settings & Look & { displayName: string };
@@ -83,13 +83,13 @@ export class ApiStore {
     // 이름은 nickname 한 칸이다. display_name 에만 있던 값을 한 번 옮기고, 이후 display_name 은 읽지도 쓰지도 않는다.
     db.run("UPDATE settings SET nickname = SUBSTR(TRIM(display_name), 1, 10) WHERE (nickname IS NULL OR TRIM(nickname) = '') AND display_name IS NOT NULL AND TRIM(display_name) <> ''");
     db.run("UPDATE settings SET display_name = NULL WHERE display_name IS NOT NULL");
-    // checkin_time(D-52 이전 열)은 더 이상 읽거나 쓰지 않는다. 옛 DB 의 NULL 허용 열은 그대로 둔다.
+    // checkin_time(이전 열)은 더 이상 읽거나 쓰지 않는다. 옛 DB 의 NULL 허용 열은 그대로 둔다.
     db.run("CREATE TABLE IF NOT EXISTS phone_accounts (account_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL)");
     db.run(`CREATE TABLE IF NOT EXISTS vehicle_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
     db.run("CREATE INDEX IF NOT EXISTS vehicle_events_car ON vehicle_events (install_id, seq)");
     db.run("CREATE TABLE IF NOT EXISTS talk_state (install_id TEXT PRIMARY KEY, state TEXT NOT NULL)");
-    // 구글 로그인(D-55). sub 만 보관한다(이메일·사진 없음). 폰 전용 계정과 차 계정에 각각 최대 하나.
+    // 구글 로그인. sub 만 보관한다(이메일·사진 없음). 폰 전용 계정과 차 계정에 각각 최대 하나.
     db.run("CREATE TABLE IF NOT EXISTS google_phone (sub TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE)");
     db.run("CREATE TABLE IF NOT EXISTS google_car (install_id TEXT PRIMARY KEY, sub TEXT NOT NULL UNIQUE)");
     // 구글 given_name(표시용 이름)만. 이메일·사진은 받지 않는다.

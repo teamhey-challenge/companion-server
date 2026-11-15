@@ -1,5 +1,5 @@
 /**
- * 일상 대화 품질 평가(PLEOS-125). 진짜 서버 경로(/v1/talk 웹소켓, OmniRoute chat-fast, 텍스트만, TTS 없음)로
+ * 일상 대화 품질 평가. 진짜 서버 경로(/v1/talk 웹소켓, OmniRoute chat-fast, 텍스트만, TTS 없음)로
  * test/fixtures/talk-quality.json 의 다중 턴 시나리오를 보내고 결정적 규칙 + LLM 심판으로 채점한다.
  *   bun scripts/talk-quality.ts [--out /tmp/talk-quality.json] [--only id,id] [--runs 1]
  * 로컬 인스턴스만 띄운다(공개 서버 아님). 키는 ~/.config/companion/server.env 에서만 읽고 출력하지 않는다.

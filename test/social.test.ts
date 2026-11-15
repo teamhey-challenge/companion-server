@@ -121,7 +121,7 @@ describe("accounts", () => {
     expect(codes).toContain(429);
   });
 
-  test("phone token may patch displayName but not proactive; checkinTime no longer exists (D-52)", async () => {
+  test("phone token may patch displayName but not proactive; checkinTime no longer exists", async () => {
     const e = boot();
     const p = await phone(e, "지은");
     expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: "08:30" })).status).toBe(400);
@@ -262,7 +262,7 @@ describe("push", () => {
     expect(carSock.of("friend_message")[0]).toMatchObject({ fromName: "민수", text: "먼저 갈게" });
   });
 
-  test("friend_arrived: only when the sender enabled shareArrival; carries no place, and the spoken line has no destination (D-53)", async () => {
+  test("friend_arrived: only when the sender enabled shareArrival; carries no place, and the spoken line has no destination", async () => {
     const e = boot();
     const a = await car(e, "install-aaaa1", "지은");
     const b = await phone(e, "민수");
@@ -287,7 +287,7 @@ describe("push", () => {
     expect(JSON.stringify(bInbox.frames)).not.toContain("카페 하늘");
   });
 
-  test("friend_arrived is sent on arrival even when no destination was ever sent (D-53: place is never sent)", async () => {
+  test("friend_arrived is sent on arrival even when no destination was ever sent (place is never sent)", async () => {
     const e = boot();
     const a = await car(e, "install-aaaa1", "지은");
     const b = await phone(e, "민수");
@@ -431,7 +431,7 @@ describe("trip end and diary", () => {
   });
 });
 
-describe("D-53 consent withdrawal and memory-off", () => {
+describe("consent withdrawal and memory-off", () => {
   const paired = async (e: Env, a: string) => {
     const pc = (await e.j<{ pairCode: string }>(await e.call("POST", "/v1/pairings", a))).pairCode;
     return (await e.j<{ phoneToken: string }>(await e.call("POST", `/v1/pairings/${pc}/claim`, undefined, { record: true, memory: true }))).phoneToken;

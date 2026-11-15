@@ -5,7 +5,7 @@ import { recall } from "../src/intents";
 import { carFactProblem, scoreTalk, type TalkScenario } from "../scripts/eval-rules";
 
 /**
- * 일상 대화 품질 평가 세트(PLEOS-125)의 결정적 부분. LLM 없이 시나리오 모양, 채점 규칙, 프롬프트에 들어가는 차량 상태·기억을 고정한다.
+ * 일상 대화 품질 평가 세트의 결정적 부분. LLM 없이 시나리오 모양, 채점 규칙, 프롬프트에 들어가는 차량 상태·기억을 고정한다.
  * 진짜 LLM 경로 평가는 `bun scripts/talk-quality.ts`(키 필요, CI 제외).
  */
 const scenarios = fixture as TalkScenario[];
