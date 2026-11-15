@@ -1,139 +1,149 @@
 # companion-server
 
-앱 이름 **Hey**(캐릭터 헤이리), 팀 **Team Hey**. 저장소 이름 `companion-*`은 그대로다.
+차 안에서 함께 달리는 AI 친구 **헤이리**(앱 Hey, 팀 Team Hey)의 서버입니다. 차량 앱과 폰 앱에서 온 대화 텍스트로 LLM을 부르고, 답을 글자와 음성(PCM)으로 실시간 스트리밍합니다. 대화·기억·친구·일기·계정 연결을 한 프로세스에서 처리하며 Bun + TypeScript로 작성했습니다.
 
-차량 캐릭터 AI 컴패니언 "헤이리"의 **서버** 저장소다. 차량 앱·폰 앱의 대화(`/v1/talk` 웹소켓)·기억·친구 메시지·일기·TTS를 맡는다. 서버는 대화 텍스트를 받아 LLM을 부르고, 답을 글자와 TTS 오디오(PCM)로 돌려준다. 기본 LLM은 OmniRoute(OpenAI 호환) `chat-fast`다. 음성 인식(STT)은 차량의 Pleos 내장 서비스(온디바이스)가 맡아 서버는 마이크 오디오를 받지 않는다.
+> [!NOTE]
+> 음성 인식(STT)은 차량의 내장 서비스가 맡습니다. 서버는 마이크 오디오를 받지 않고, 글로 바뀐 발화만 받습니다.
 
-## 제출물과 주소
+## 기능
 
-- 운영 서버: https://hey.lastmile.ltd/api (`/healthz`는 인증 없이 `{"ok":true}`). APK는 차량 앱·폰 앱 저장소의 `apk/`(`TeamHey_Hey_release.apk`, `TeamHey_Hey-phone_release.apk`)와 https://hey.lastmile.ltd/download/latest.apk, https://hey.lastmile.ltd/download/phone/latest.apk 에 있다.
+- **WebSocket 대화**: `/v1/talk`로 한 턴씩 주고받습니다. LLM 답은 글자 조각(`reply.delta`)으로 흘러가고, 문장이 끝날 때마다 스트리밍 TTS가 합성한 PCM이 바이너리 프레임으로 이어집니다. TTS를 쓸 수 없으면 `audio:"none"`을 보내 앱이 기기 TTS로 읽게 합니다.
+- **기억**: 대화에서 사실과 요약을 추출해 저장하고, 이어지는 말을 할 때 관련 기억을 꺼내 씁니다. 폰에서 항목별·전체 삭제가 가능합니다.
+- **먼저 말 걸기**: 차량 신호(와이퍼·라이트·도어·충전·기어·내비 잔여 거리 등)의 변화를 보고 서버가 말을 걸지 정합니다. 같은 이유로는 쿨다운이 있고, 주행 중 답은 2문장 이내입니다.
+- **친구·요청·메시지**: 초대 코드로 친구를 맺고, 120자 이하 메시지를 보냅니다. 안전 필터를 거치며 신고할 수 있습니다. "민수한테 늦는다고 전해 줘"처럼 말로도 보냅니다.
+- **여정 일기**: 주차(기어 P + 운전석 도어 열림)하면 폰에 여정 종료를 알리고, 그날의 일기를 LLM이 짧게 씁니다. 좌표는 쓰지 않고 목적지 이름만 남깁니다.
+- **폰 구글 로그인과 차 연결**: 구글 ID 토큰을 검증해 폰 계정을 만들고, 차가 보여 주는 6자 코드로 폰과 차를 연결합니다.
+- **개인정보 삭제**: 동의 항목별 철회, 기억 삭제, 연결 해제를 지원합니다. 기억·녹음 동의를 철회하면 그 계정의 일기와 친구 메시지가 즉시 삭제됩니다.
 
-## 테스트 환경과 실행
+## 구조
 
-- 런타임 Bun 1.4.2(CI와 같은 버전) + TypeScript. 심사용 에뮬레이터는 Pleos Connect `pleos_connect_v2_1`이다.
-- 실행: `bun install`, `bun src/index.ts`(설정은 아래 "설정" 표, 비밀은 권한 600 파일로만 읽는다).
-- 시험: `bun run check`(단위 시험 + tsc)는 외부 키 없이 돈다. 실제 LLM·TTS 호출은 키가 있는 환경에서만 `scripts/smoke.ts`로 확인한다.
+```
+src/
+├── index.ts          진입점: 환경 설정을 읽고 서버 시작, 고정 문장 TTS 예열
+├── server.ts         HTTP/WebSocket 서버, 차량 등록·세션 발급, 요청 한도
+├── api.ts            폰·차용 REST 라우터 (동의·연결·기억·설정·친구·메시지·일기)
+├── api-store.ts      계정·동의·기억·연결 저장소 (SQLite)
+├── social.ts         친구·메시지·일기 흐름과 푸시
+├── social-store.ts   친구·메시지·일기 저장소 (SQLite)
+├── talk.ts           /v1/talk 핸들러: 턴 상태, 취소, 기억 추출, 먼저 말 걸기
+├── proactive.ts      차량 신호로 먼저 말 걸기를 정하는 규칙 (순수 함수)
+├── onboarding.ts     첫 만남 질문·인사 흐름
+├── tts.ts            스트리밍 TTS 어댑터와 고정 문장 캐시 (메모리 전용)
+├── llm/              LLM 공급자 어댑터 (anthropic·openai·gemini·openai-compatible), SSE 파서, 페르소나
+├── safety.ts         메시지·출력 안전 필터
+├── google.ts         구글 ID 토큰 검증
+├── auth.ts           비밀 로드, Bearer 토큰, 클라이언트 IP 판정
+├── rate-limit.ts     기기·IP별 요청 한도
+└── observe.ts        한 줄 JSON 로그와 오류 집계
+```
 
-## 개인정보
+프레임 정의와 검증기는 `shared/packages/protocol`(서브모듈 `companion-shared`)에 있습니다.
 
-- 서버는 마이크 오디오를 받지 않고 인식된 문장 글자만 받는다. `ctx`의 좌표 키(`lat`·`lon`·`gps`·`location` 등)는 버리고, 일기에는 목적지 이름만 쓰며 좌표를 저장하지 않는다. 구글 로그인은 `sub`만 저장한다.
-- 기억·녹음 동의를 철회하면 그 계정의 일기·친구 메시지를 바로 지운다.
+## API 개요
 
-## 남아 있는 부품
+인증 헤더는 차량 토큰 또는 폰 토큰 `Authorization: Bearer <token>`입니다. 오류는 `{"error": "<code>"}` 형태로 돌려줍니다.
 
-| 파일 | 내용 |
+| 경로 | 설명 |
 |---|---|
-| `src/index.ts` | 서버 진입점: `/healthz`, 차량 등록·세션 발급, `/v1/talk` |
-| `src/talk.ts` | `/v1/talk` 웹소켓 핸들러(턴 상태·취소·ctx 좌표 제거), 설정 로드 |
-| `src/store.ts` | 차량 등록 sqlite(carToken은 해시만)와 한 번 쓰는 웹소켓 티켓 |
-| `src/llm/` | provider 인터페이스, anthropic·openai·gemini·openai-compatible 어댑터, SSE 파서, 페르소나 초안(임시), 비밀 파일 로더 |
-| `src/observe.ts` | 한 줄 JSON 로그와 오류 코드 집계 |
-| `src/process-guard.ts` | 처리되지 않은 예외·종료 신호 방어, 로그 쓰기 |
-| `src/rate-limit.ts`, `src/clock.ts` | 기기별 요청 한도, 시험용 가짜 시계·타이머 |
-| `src/persist.ts` | 원자적 JSON 쓰기(0600) |
-| `scripts/smoke.ts` | 서버를 띄워 한 턴을 보내고 firstTokenMs·totalMs·모델을 출력 |
-| `scripts/run-relay.sh` | 로그 회전하며 분리 기동 (`HEY_*` 이름은 그대로) |
+| `GET /healthz` | 상태 확인. 외부에는 `{"ok":true}`만 노출 |
+| `POST /v1/cars/register` | 차량 등록, 차량 토큰 발급 (IP별 분당 한도) |
+| `POST /v1/sessions` | 차량 토큰으로 일회용 WebSocket 티켓 발급 |
+| `POST /v1/phone-sessions` | 폰 토큰으로 일회용 WebSocket 티켓 발급 |
+| `DELETE /v1/phone-sessions/current` | 폰 로그아웃 (토큰 폐기) |
+| `POST /v1/auth/google` | 구글 ID 토큰으로 로그인, 폰 토큰 발급 |
+| `GET /v1/account` | 계정 정보 |
+| `POST /v1/pairings` | 차: 연결 코드 발급 |
+| `GET /v1/pairings/{code}` | 폰: 코드 상태 조회 |
+| `POST /v1/pairings/{code}/claim` | 폰: 코드로 차와 연결 |
+| `GET` · `DELETE /v1/pairings/current` | 차: 연결 상태 조회 / 차·폰: 연결 해제 |
+| `GET` · `POST /v1/consents`, `DELETE /v1/consents/{type}` | 동의 조회·기록·철회 |
+| `GET` · `DELETE /v1/memory`, `DELETE /v1/memory/{id}` | 기억 목록, 전체·항목 삭제 |
+| `GET` · `PATCH /v1/settings` | 호칭·말투·수다 정도 등 설정 |
+| `POST /v1/vehicle-events` | 차: 차량 이벤트 전달 |
+| `POST /v1/friends/invites` | 친구 초대 코드 만들기 |
+| `POST /v1/friends/invites/{code}/accept` | 초대 수락 |
+| `GET /v1/friends`, `PATCH`·`DELETE /v1/friends/{id}` | 친구 목록, 도착 알림 설정, 끊기 |
+| `POST` · `GET /v1/messages`, `POST /v1/messages/{id}/report` | 메시지 보내기·조회·신고 |
+| `GET /v1/diary?date=YYYY-MM-DD` | 하루 일기와 요약 |
+| `WS /v1/talk?ticket=…` | 대화 (차·폰 공통) |
+| `WS /v1/inbox/stream?ticket=…` | 폰 푸시 수신 (친구 메시지, 여정 종료, 일기 완성) |
 
-## 인증과 /v1/talk
+### /v1/talk
 
-프레임 정의와 검증기는 `shared/packages/protocol`(v0.2.0~)이 정본이다. 고정 공유 토큰은 없다.
-
-1. `POST /v1/cars/register` — 본문 `{"installId":"8~64자"}` → `{"carToken"}`. 비밀 없이 열려 있고 IP별 분당 한도만 있다(넘으면 429). 같은 installId로 다시 하면 토큰이 바뀐다(이전 것은 무효).
-2. `POST /v1/sessions` — `Authorization: Bearer <carToken>` → `{"sessionId","wsTicket","expiresInSec":60}`. 없거나 틀리면 401.
-3. `WS /v1/talk?ticket=<wsTicket>` — 티켓은 한 번만, 60초 안에 쓴다. 없거나 틀리거나 이미 쓴 티켓은 업그레이드 전에 401.
-
-텍스트 프레임(JSON)만 받는다. 앱→서버 바이너리는 `1003`으로 닫는다. 순서: `hello` → `turn.start` → `text`/`ctx` → `turn.end`(또는 `turn.cancel`). `ctx`의 좌표 키(`lat`·`lon`·`gps`·`location` 등)는 조용히 버리고 턴은 계속한다.
+티켓은 한 번만, 60초 안에 쓸 수 있습니다. 텍스트 프레임은 JSON이고, 앱→서버 바이너리는 받지 않습니다(`1003`으로 닫음).
 
 ```
 → {"type":"hello","v":1,"appVersion":"1.0"}
 → {"type":"turn.start","turnId":"t1","trigger":"ptt"}
 → {"type":"text","turnId":"t1","text":"오늘 비 와서 천천히 갈게"}
 → {"type":"turn.end","turnId":"t1"}
-← {"type":"reply.start","turnId":"t1","audio":{"format":"pcm_s16le","sampleRate":24000,"channels":1}}   (TTS 없으면 "audio":"none")
-← {"type":"reply.delta","turnId":"t1","text":"..."}            (여러 번)
-← (바이너리: PCM s16le 24kHz mono 조각)                         (여러 번)
-← {"type":"reply.end","turnId":"t1","text":"...","firstTokenMs":..,"totalMs":..}
+← {"type":"reply.start","turnId":"t1","audio":{"format":"pcm_s16le","sampleRate":24000,"channels":1}}
+← {"type":"reply.delta","turnId":"t1","text":"…"}      (여러 번)
+← (바이너리: PCM s16le 24kHz mono 조각)                 (여러 번)
+← {"type":"reply.end","turnId":"t1","text":"…","firstTokenMs":0,"totalMs":0}
 ```
 
-`turn.cancel` 뒤에는 그 턴의 프레임(텍스트·바이너리)을 더 보내지 않는다.
-
-### 서버 TTS (D-21)
-
-`reply.start.audio`는 `{"format":"pcm_s16le","sampleRate":24000,"channels":1}` 또는 `"none"`. LLM 답이 한 문장 끝날 때마다 BreezeBlue 스트리밍 TTS(`hey_voice.json` 설정, `instructions` 없음)를 시작하고(동시 2개), PCM 조각을 문장 순서대로 **바이너리 프레임**으로 보낸다. `reply.start`는 첫 오디오(또는 실패)가 정해질 때 나가고, 그 전에 온 텍스트 델타는 직후에 쏟아진다. TTS 꺼짐·키 없음·잔액 부족·공급사 오류면 `"none"`이라서 앱이 Pleos TTS로 읽는다. 중간에 실패하면 오디오만 거기서 끊기고 텍스트는 끝까지 간다. 오디오는 디스크에 쓰지 않는다. 목소리가 404면 원본 샘플로 복제를 한 번만 다시 만든다.
+`turn.cancel`을 보내면 그 턴의 프레임은 더 나가지 않습니다. 차량 상태는 `ctx` 프레임으로 보내며, 좌표 필드는 서버가 버립니다.
 
 ## 설정
 
-| 변수 | 기본값 | 내용 |
-|---|---|---|
-| `LLM_PROVIDER` | `openai-compatible` | `anthropic` · `openai` · `gemini` · `openai-compatible` |
-| `LLM_MODEL` | `chat-fast` | OmniRoute에서는 claude-haiku-5.5 → haiku-4.5 → deepseek 순으로 대체 |
-| `LLM_BASE_URL` | 없음 | openai-compatible 전용, 예: `http://127.0.0.1:20128/v1` |
-| `LLM_API_KEY` | 없음 | 키는 권한 600 비밀 파일(`server.env`)에서만 읽는다. 예시는 `server.env.example` |
-| `BREEZE_API_KEY` | 없음 | BreezeBlue 키(600 파일에서만). 없으면 TTS 없이 `audio:"none"` |
-| `COMPANION_TTS_PROVIDER` | `breeze` | `breeze` · `fake`(시험·CI용 가짜 PCM) · `off` |
-| `COMPANION_VOICE_SAMPLE` | 없음 | 목소리를 잃었을 때(404) 복제를 다시 만들 원본 mp3 경로 |
-| `COMPANION_DATA_DIR` | `./data` | sqlite 파일(`companion.sqlite`) 폴더. 컨테이너에서는 `/data`(이름 있는 볼륨) |
-| `COMPANION_HTTP_PER_MIN` | `30` | IP별 등록·세션 발급 한도(분). 초과 시 429 |
-| `COMPANION_TRUST_PROXY` | 없음 | `1`일 때만 `CF-Connecting-IP`/`X-Forwarded-For`를 클라이언트 IP로 믿는다. Cloudflare 터널 뒤에서는 `1` |
-| `COMPANION_UPGRADES_PER_MIN` | `30` | IP별 업그레이드 시도 한도(분). 초과 시 429 |
-| `COMPANION_TURNS_PER_MIN` | `20` | 연결별 turn 한도(분). 초과 시 `{"type":"error","code":"rate_limited"}`, LLM 호출 없음 |
-| `COMPANION_TURNS_PER_DAY` | `300` | 서버 전체 하루 turn 한도(LLM 비용 상한). 같은 응답 |
-| `HOST` | 모든 인터페이스 | 바인드 주소. 컨테이너 없이 쓸 때는 `127.0.0.1` 권장 |
-| `PASSENGER_WEB_URL` | `https://hey.lastmile.ltd` | 친구 초대 링크의 앞부분. 링크는 `${PASSENGER_WEB_URL}/f/{코드}` |
-| `GOOGLE_WEB_CLIENT_ID` | 없음 | 구글 로그인(D-55) 웹 클라이언트 ID. 비면 `POST /v1/auth/google`이 503 `google_login_unconfigured`. 서버는 `sub`만 저장한다 |
-| `COMPANION_ALLOW_NONGOOGLE_CLAIM` | 없음 | `1`일 때만 구글이 아닌 폰 토큰(`/v1/phones/register`, 토큰 없음)의 `POST /v1/pairings/{code}/claim`을 받는다. e2e 시험 서버 전용, 운영은 비워 둔다(D-57: 비구글 claim은 403 `google_login_required`) |
+값은 환경변수 또는 `~/.config/companion/server.env`(권한 600)에서 읽습니다. 변수 이름만 적은 예시는 `server.env.example`에 있습니다.
 
-`/healthz`는 인증 없이 열려 있고 공개 요청에는 `{"ok":true}`만 돌려준다. provider·model·오류 집계는 프록시 헤더 없는 루프백 요청에만 나온다.
-
-## 친구·메시지·일기 (D-47)
-
-계정은 차의 `install_id`(폰이 페어링되어 있으면 같은 계정)이고, 차 없는 친구는 `POST /v1/phones/register {displayName}`로 폰 전용 계정(`ph_…`)과 폰 토큰을 받는다(IP별 분당 한도, 동의는 별도 `POST /v1/consents`). 폰은 `POST /v1/phone-sessions`로 소켓마다 한 번 쓰는 티켓을 받아 `/v1/talk`(차와 같은 프레임)와 `/v1/inbox/stream`(서버→폰 푸시만)에 연결한다.
-
-구글 로그인: `POST /v1/auth/google {idToken}`(IP별 분당 한도)은 RS256 서명·`iss`·`aud`·`exp`를 검사하고 `{phoneToken, accountId, displayName, linkedCar, isNew}`를 준다. 차에 묶인 `sub`면 차 계정, 아니면 폰 전용 계정(없으면 given_name으로 새로 만든다). 구글 폰 토큰으로 `POST /v1/pairings/{code}/claim` 하면 그 차가 `sub`에 묶이고, 다른 `sub`가 이미 묶인 차는 409 `car_linked_to_other_account`. `DELETE /v1/pairings/current`는 묶음을 푼다. 이름만 쓰는 `/v1/phones/register`는 e2e가 아직 써서 남겨 둔다.
-
-| 경로 | 내용 |
+| 변수 | 설명 |
 |---|---|
-| `POST /v1/friends/invites` | `{code,url,expiresAt}`, 6자 코드 24시간(여러 명이 쓸 수 있다) |
-| `POST /v1/friends/invites/{code}/accept` | 서로 친구, `{friend}`. 자기 코드 400, 모르는 코드 404, 만료 410 |
-| `GET /v1/friends` · `DELETE /v1/friends/{id}` · `PATCH /v1/friends/{id} {shareArrival}` | 목록(배열), 끊기(양쪽 삭제), 도착 알리기(기본 꺼짐) |
-| `POST /v1/messages {toFriendId,text}` | 120자 이하, 안전 필터(욕설·링크·위험·자해·성적·혐오). 걸리면 `422 {error:"message_blocked",code:"message_blocked"}` |
-| `GET /v1/messages?since=` | `{messages:[{id,direction:"in"\|"out",friendId,friendName,text,at}]}` 최신순, 신고된 것 제외 |
-| `POST /v1/messages/{id}/report` | 받은 사람만, 204. 메시지는 숨겨지고 `message_reports`에 남는다 |
-| `GET /v1/diary?date=` | `{date,entries:[{at,text,kind}],summary}`. kind: `trip_start`·`trip_done`·`friend_message`·`charging` |
+| `LLM_PROVIDER` / `LLM_MODEL` | LLM 공급자(`anthropic`·`openai`·`gemini`·`openai-compatible`)와 모델 |
+| `LLM_BASE_URL` / `LLM_API_KEY` | OpenAI 호환 공급자의 주소와 키 |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | 공급자별 키 |
+| `BREEZE_API_KEY` | TTS 공급자 키. 비면 음성 없이 글자만 보냅니다 |
+| `COMPANION_TTS_PROVIDER` | `breeze`(기본) · `fake`(시험용 가짜 PCM) · `off` |
+| `COMPANION_TTS_PRIME` | `0`이면 시작할 때 고정 문장을 미리 합성하지 않습니다 |
+| `BREEZE_VOICE_ID` / `ONBOARDING_VOICE_ID` / `COMPANION_VOICE_SAMPLE` | 캐릭터 목소리, 온보딩 목소리, 목소리 복제용 원본 파일 경로 |
+| `GOOGLE_WEB_CLIENT_ID` | 구글 로그인용 웹 클라이언트 ID. 비면 `POST /v1/auth/google`이 503을 돌려줍니다 |
+| `COMPANION_ALLOW_NONGOOGLE_CLAIM` / `COMPANION_ALLOW_PHONE_ONLY` | `1`이면 구글이 아닌 폰 토큰·폰 전용 계정을 허용. 시험 서버 전용, 운영은 비워 둡니다 |
+| `COMPANION_TRUST_PROXY` | `1`이면 프록시가 넣은 `CF-Connecting-IP`/`X-Forwarded-For`를 클라이언트 IP로 믿습니다 |
+| `COMPANION_HTTP_PER_MIN` · `COMPANION_UPGRADES_PER_MIN` · `COMPANION_TURNS_PER_MIN` · `COMPANION_TURNS_PER_DAY` | IP별 등록·세션 한도, IP별 업그레이드 한도, 연결별 분당 턴 한도, 서버 전체 하루 턴 한도 |
+| `PASSENGER_WEB_URL` | 친구 초대 링크의 앞부분 (`${PASSENGER_WEB_URL}/f/{코드}`) |
+| `PORT` · `HOST` | 수신 포트(기본 8787)와 바인드 주소 |
+| `COMPANION_DATA_DIR` · `COMPANION_LOG_FILE` | SQLite 폴더(기본 `./data`), 로그 파일 경로 |
 
-푸시: 차 소켓은 `friend_message`/`friend_arrived` JSON 뒤에 `reply.start`·PCM·`reply.end`(turnId = 프레임 id)로 헤이리 목소리를 받는다(TTS 없으면 `audio:"none"`). 폰 받은편지함은 `friend_message`·`friend_arrived`·`trip_done`·`diary_ready`를 받는다. 못 읽어 준 메시지는 차가 연결될 때 최근 5개를 읽어 준다.
+> [!WARNING]
+> API 키와 비밀값은 저장소에 두지 않습니다. 600 권한 파일이나 환경변수로만 주입하세요.
 
-말로 전하기: "○○한테 … 전해 줘"(이름이 겹치면 되묻고 다음 답으로 보낸다), 방금 온 메시지(10분 안)에는 "고맙다고 전해 줘"처럼 이름 없이. 보낸 뒤 "○○한테 전했어!"로 확인한다.
+## 로컬 실행
 
-운전 끝: ctx `gear:"P"` + `driverDoorOpen`(또는 `doorOpen`)이 새로 열림, 못 보면 P 60초. 이때 폰에 `trip_done`을 보내고 그날 일기를 LLM(헤이리 목소리, 3~5문장, 목적지 이름만·좌표 없음)으로 쓰면 `diary_ready`. 기억 저장이 꺼져 있으면(동의 없음·설정 끔) 일기는 쓰지 않고 `trip_done`만 보낸다. 도착 알림은 ctx `arrived:true`(없으면 운전 끝)에서 `shareArrival`을 켠 친구에게만 보내고, 프레임은 `{type:"friend_arrived",id,fromName}`뿐이며 목적지·장소 이름은 싣지 않는다(읽어 주는 말 "○○가 도착했대", D-53). 기억·녹음 동의를 철회하면 그 계정의 일기·친구 메시지(보낸 것·받은 것)를 바로 지운다. 설정에 `checkinTime`은 없다(D-52).
-
-## 온보딩·가족 (D-48)
-
-`/v1/talk` 위의 온보딩 프레임(hello·동의 필요, 주행 중에도 막지 않는다): 앱→서버 `{"type":"onboarding","step":"whale_intro|q1|q2|q3|greeting"}`는 그 단계를 지금 말하라는 뜻이고, 서버는 `{"type":"onboarding","step","id","text"?}` 뒤에 `reply.start`·PCM·`reply.end`(turnId = id)를 보낸다. 고래 단계(`whale_intro`·`q1`~`q3`)는 고정 대사를 고래 목소리로, `greeting`은 헤이리 목소리로 q1~q3 답을 녹여 LLM이 쓴다(LLM 키가 없거나 실패하면 고정 인사). 답은 앱→서버 `{"type":"onboarding.answer","step":"q1|q2|q3","text":"<STT 문장>"}`, 응답 `{"type":"onboarding.ack","step","ok","name"?}`. `ok:false`(안전 필터·알아듣지 못함)면 다시 묻는다. q1은 `nickname`(settings 프레임 푸시), q2·q3는 운전자의 기억(기억 동의가 있을 때)이 된다. 이름은 계정당 `nickname` 한 칸이고(1~10자, 숫자만 불가, 안전 필터), `displayName`은 응답에만 나오는 읽기 전용 별칭(= `nickname` ?? "친구")이다. 폰·차의 PATCH `displayName`/`nickname`은 모두 `nickname`에 쓰며 친구에게 보이는 이름도 같다. 온보딩을 하면 헤이리의 어투·호칭 첫 만남(F2)은 끝난 것으로 본다.
-
-고래 목소리: `ONBOARDING_VOICE_ID`(환경변수 또는 비밀 파일 `server.env`). 없으면 헤이리 목소리로 대신하고 시작할 때 `tts.whale_voice_fallback`을 한 번 로그한다. 값은 로그·저장소에 남기지 않는다.
-
-가족(D-38·D-48): 운전자가 "우리 딸이야, 이름은 ○○"라고 소개하면 이름·관계만 운전자의 기억으로 남기고(기억 추출 지시), 소개받은 사람이 한 말은 기억하지 않는다. 헤이리는 기억에 가족 이름이 있으면 여럿이 탔을 때 이름을 번갈아 부른다(페르소나). 알림은 친구 메시지와 운전 끝 일기(`trip_done`·`diary_ready`)에서만 나간다.
-
-## 점검
+[Bun](https://bun.sh) 1.4.2가 필요합니다.
 
 ```sh
-git clone --recurse-submodules git@github.com:teamhey-challenge/companion-server.git
+git clone --recurse-submodules https://github.com/teamhey-challenge/companion-server.git
+cd companion-server
 bun install
-bun run check   # 단위 시험 + tsc
-bun run scripts/smoke.ts "오늘 비 와서 천천히 갈게"   # 실제 LLM 한 턴
+
+# 최소 설정: LLM 키(없으면 대화 없이 서버만 뜹니다)
+export COMPANION_TTS_PROVIDER=fake   # 외부 TTS 없이 시험
+
+bun run start                        # = bun src/index.ts, 기본 포트 8787
 ```
 
-`shared/`는 `companion-shared` 서브모듈이다. 비밀값(API 키)은 저장소에 두지 않고 권한 600 파일로만 읽는다.
+실제 LLM으로 한 턴을 확인하려면 키를 설정한 뒤 `bun run scripts/smoke.ts "오늘 비 와서 천천히 갈게"`를 실행하세요. 첫 토큰 시간과 총 시간, 모델을 출력합니다.
 
-## 링크·라이선스
+## 테스트
 
-| 저장소 | 내용 |
-|---|---|
-| [companion-car](https://github.com/teamhey-challenge/companion-car) | 차량 앱 |
-| [companion-phone](https://github.com/teamhey-challenge/companion-phone) | 폰 앱(QR 연결·동의·기억 관리) |
-| [companion-server](https://github.com/teamhey-challenge/companion-server) | 대화·기억·TTS 서버(이 저장소) |
-| [companion-web](https://github.com/teamhey-challenge/companion-web) | 폰 웹(폰 앱의 백업)·디자인 시스템 Storybook |
-| [companion-shared](https://github.com/teamhey-challenge/companion-shared) | 디자인 토큰·프로토콜(서브모듈 `shared/`) |
+```sh
+bun run check      # 단위 시험 + 타입 검사 (외부 키 불필요)
+bun test ./test    # 시험만
+bun run typecheck  # tsc만
+```
 
-- 코드는 MIT(`LICENSE`). 외부 서비스·라이브러리 고지는 `THIRD_PARTY.md`.
+시험은 가짜 LLM·TTS·시계를 쓰므로 네트워크 없이 돕니다. 안전 필터와 답변 품질 평가 자료는 `test/fixtures/`에 있습니다.
+
+## 배포
+
+저장소에 Dockerfile은 없습니다. 서버는 단일 Bun 프로세스이므로 `bun src/index.ts`를 서비스로 띄우고, 앞단에 TLS와 WebSocket 업그레이드를 지원하는 리버스 프록시를 두면 됩니다. 프록시 뒤에서는 `COMPANION_TRUST_PROXY=1`을 켜고, 데이터 폴더(`COMPANION_DATA_DIR`)는 영속 볼륨에 두세요. `main`에 병합할 때마다 CI가 `bun run check`를 실행합니다.
+
+## 개인정보
+
+수집·보관·삭제 방식은 [개인정보 처리방침](https://hey.lastmile.ltd/privacy)을 참고하세요.
+
+## 라이선스
+
+MIT ([LICENSE](LICENSE)). 외부 서비스·라이브러리 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 있습니다.
