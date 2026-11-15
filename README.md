@@ -71,12 +71,15 @@
 | `COMPANION_TURNS_PER_DAY` | `300` | 서버 전체 하루 turn 한도(LLM 비용 상한). 같은 응답 |
 | `HOST` | 모든 인터페이스 | 바인드 주소. 컨테이너 없이 쓸 때는 `127.0.0.1` 권장 |
 | `PASSENGER_WEB_URL` | `https://hey.lastmile.ltd` | 친구 초대 링크의 앞부분. 링크는 `${PASSENGER_WEB_URL}/f/{코드}` |
+| `GOOGLE_WEB_CLIENT_ID` | 없음 | 구글 로그인(D-55) 웹 클라이언트 ID. 비면 `POST /v1/auth/google`이 503 `google_login_unconfigured`. 서버는 `sub`만 저장한다 |
 
 `/healthz`는 인증 없이 열려 있고 공개 요청에는 `{"ok":true}`만 돌려준다. provider·model·오류 집계는 프록시 헤더 없는 루프백 요청에만 나온다.
 
 ## 친구·메시지·일기 (D-47)
 
 계정은 차의 `install_id`(폰이 페어링되어 있으면 같은 계정)이고, 차 없는 친구는 `POST /v1/phones/register {displayName}`로 폰 전용 계정(`ph_…`)과 폰 토큰을 받는다(IP별 분당 한도, 동의는 별도 `POST /v1/consents`). 폰은 `POST /v1/phone-sessions`로 소켓마다 한 번 쓰는 티켓을 받아 `/v1/talk`(차와 같은 프레임)와 `/v1/inbox/stream`(서버→폰 푸시만)에 연결한다.
+
+구글 로그인: `POST /v1/auth/google {idToken}`(IP별 분당 한도)은 RS256 서명·`iss`·`aud`·`exp`를 검사하고 `{phoneToken, accountId, displayName, linkedCar, isNew}`를 준다. 차에 묶인 `sub`면 차 계정, 아니면 폰 전용 계정(없으면 given_name으로 새로 만든다). 구글 폰 토큰으로 `POST /v1/pairings/{code}/claim` 하면 그 차가 `sub`에 묶이고, 다른 `sub`가 이미 묶인 차는 409 `car_linked_to_other_account`. `DELETE /v1/pairings/current`는 묶음을 푼다. 이름만 쓰는 `/v1/phones/register`는 e2e가 아직 써서 남겨 둔다.
 
 | 경로 | 내용 |
 |---|---|
