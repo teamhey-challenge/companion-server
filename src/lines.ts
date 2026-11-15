@@ -16,9 +16,40 @@ export const pick = (p: Pair, s: SpeechStyle): string => p[s];
 /** 이름 뒤 주격 조사: 받침 있으면 "이가"(지은이가), 없으면 "가"(민수가). */
 export const ga = (name: string): string => `${name}${hasBatchim(name[name.length - 1] ?? "") ? "이" : ""}가`;
 
+const batchimOf = (ch: string | undefined): number => {
+  const c = ch ? ch.charCodeAt(0) : 0;
+  return c >= 0xac00 && c <= 0xd7a3 ? (c - 0xac00) % 28 : -1;
+};
+/** 받침 ㄴ(4), ㅆ(20). */
+const NIEUN = 4;
+const SSANGSIOT = 20;
+
+/**
+ * 친구가 한 말을 간접 인용으로 바꾼다: "저녁에 보자" → "저녁에 보재", "캠핑 간다" → "캠핑 간대".
+ * 끝맺음이 분명할 때만 바꾼다: -자→-재, -다→-대, -해→-하래, -줘→-달래, -니/-냐→-냬, 과거·좋아/싫어류 -어/-아→-대.
+ * 명사로 끝나거나 문장이 여럿이거나 이모지가 있거나 뜻이 갈리는 -어/-아면 그대로 읽는다. 존댓말이면 끝에 "요"를 붙인다.
+ */
+export function indirectQuote(text: string, s: SpeechStyle): string {
+  const body = text.trim().replace(/[.!?…~\s]+$/u, "");
+  const question = /\?\s*$/u.test(text);
+  if (!body || /\p{Extended_Pictographic}|[\n\r.!?…]/u.test(body)) return text;
+  const last = body[body.length - 1]!;
+  const prev = body[body.length - 2];
+  const stem = body.slice(0, -1);
+  let end: string | null = null;
+  if (last === "자" && !question && /\s/.test(body)) end = "재";
+  else if (last === "다" && !question && (batchimOf(prev) === NIEUN || batchimOf(prev) === SSANGSIOT || (prev !== undefined && "좋싫많없있같".includes(prev)))) end = "대";
+  else if (last === "줘" && !question) end = "달래";
+  else if (last === "해" && !question) end = "하래";
+  else if (last === "냐" || (last === "니" && prev !== undefined && (question || "았었였했겠".includes(prev)))) end = "냬";
+  else if ((last === "어" || last === "아") && !question && /(?:[았었였했겠]어|[았었였했겠]아|좋아|싫어)$/u.test(body)) end = "대";
+  if (end === null) return text;
+  return `${stem}${end}${s === "jondaetmal" ? "요" : ""}`;
+}
+
 /** 친구가 보낸 말을 읽어 주는 한 줄. */
 export const friendSaid = (name: string, text: string, s: SpeechStyle): string =>
-  s === "jondaetmal" ? `${name}님이 그러는데요, ${text}` : `${ga(name)} 그러는데, ${text}`;
+  s === "jondaetmal" ? `${name}님이 그러는데요, ${indirectQuote(text, s)}` : `${ga(name)} 그러는데, ${indirectQuote(text, s)}`;
 
 /** 친구가 도착을 알렸을 때(D-53: 장소 이름은 절대 넣지 않는다). */
 export const friendArrivedLine = (name: string, s: SpeechStyle): string =>

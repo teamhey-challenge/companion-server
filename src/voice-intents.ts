@@ -13,10 +13,17 @@ const WITH_NAME = new RegExp(`^(.{1,12}?)\\s*(?:한테|에게|께)\\s*(.+?)\\s*$
 const NO_NAME = new RegExp(`^(.{1,60}?)\\s*${VERB}\\s*[.!?]*$`);
 const PRONOUN = /^(?:나|저|내|너|우리)$/u;
 
-/** "늦는다고" → "늦는다", "고맙다고" → "고마워!" */
-function cleanBody(raw: string): string {
+/**
+ * "늦는다고" → "늦는다", "고맙다고" → "고마워!", "전화하라고" → "전화해", "도와달라고" → "도와줘", "학생이라고" → "학생이야".
+ * 직접 말투로 돌려 놓아야 읽어 줄 때 "…그러는데, …재/대/래"로 다시 바뀐다.
+ */
+export function cleanBody(raw: string): string {
   const t = raw.trim().replace(/고$/u, "");
-  return /^(고맙|고마워|감사)/.test(t) ? "고마워!" : t;
+  if (/^(고맙|고마워|감사)/.test(t)) return "고마워!";
+  if (/하라$/u.test(t)) return t.replace(/하라$/u, "해");
+  if (/달라$/u.test(t)) return t.replace(/달라$/u, "줘");
+  if (/이라$/u.test(t)) return t.replace(/이라$/u, "이야");
+  return t;
 }
 
 export function parseSendIntent(text: string): SendIntent | null {
