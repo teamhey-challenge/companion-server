@@ -1,0 +1,60 @@
+# companion-server pipeline. Gates and thresholds: pleos-challenge/docs/status/2026-11-16-gitlab/ci-gates.md
+# Pipelines run for MRs and main only. Merge requires a green pipeline (main is protected).
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages: [scan, check, build]
+
+variables:
+  GIT_STRATEGY: fetch
+  GIT_DEPTH: "0"                       # merge-base diff for the secrets scan needs history
+  GIT_SUBMODULE_STRATEGY: recursive    # shared/ (relative url ../companion-shared.git, job token allowlisted)
+  BUN_INSTALL_CACHE_DIR: $CI_PROJECT_DIR/.bun-cache
+
+default:
+  image: oven/bun:1.4.2-debian@sha256:4f6e31d1a54d6a3dd312daef655fc998101b5043d52e12592ac293ef04b9bc73
+  tags: [pleos, docker, light, bun]
+  interruptible: true
+  timeout: 15m
+
+.bun-cache:
+  cache:
+    key: { files: [bun.lock] }
+    paths: [.bun-cache]
+    policy: pull-push
+
+# Secrets scan on lines this change adds (merge-base..HEAD), not on history already published. Blocking.
+secrets-scan:
+  stage: scan
+  image:
+    name: zricethezav/gitleaks:v8.21.2@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
+    entrypoint: [""]
+  script:
+    - |
+      base="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+      if [ -z "$base" ] && [ -n "${CI_COMMIT_BEFORE_SHA:-}" ] && [ "$CI_COMMIT_BEFORE_SHA" != 0000000000000000000000000000000000000000 ]; then base="$CI_COMMIT_BEFORE_SHA"; fi
+      [ -n "$base" ] || base="$(git rev-parse HEAD~1)"
+      echo "scanning added lines in $base..HEAD"
+      git config --global --add safe.directory "$CI_PROJECT_DIR"
+      gitleaks git --log-opts="$base..HEAD" --no-banner --redact --verbose .
+
+# `bun test` + tsc + dependency-cruiser boundaries (ratchet: ci/depcruise-known.json) + file-size ratchet (ci/size-ratchet.json).
+check:
+  stage: check
+  extends: .bun-cache
+  script:
+    - bun install --frozen-lockfile
+    - bun run check
+
+# Entry point compiles for the target runtime without running it.
+build:
+  stage: build
+  extends: .bun-cache
+  script:
+    - bun install --frozen-lockfile
+    - bun build src/index.ts --target=bun --outfile=/tmp/server.js
+  needs: [check]
