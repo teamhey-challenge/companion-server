@@ -186,11 +186,19 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     const open =
       (path === "/v1/account" && m === "GET") ||
       (/^\/v1\/consents(\/|$)/.test(path) && (m === "GET" || m === "POST" || m === "DELETE")) ||
-      (path === "/v1/pairings/current" && m === "DELETE");
+      (path === "/v1/pairings/current" && m === "DELETE") ||
+      (path === "/v1/phone-sessions/current" && m === "DELETE");
     if (!open) {
       d.reject("api.car_link_required");
       return err("car_link_required", 403);
     }
+  }
+
+  if (path === "/v1/phone-sessions/current" && m === "DELETE") {
+    if (who.kind !== "phone") return json({ error: "forbidden" }, 403);
+    const t = bearer(req.headers);
+    if (t) d.api.revokePhoneToken(t);
+    return noContent();
   }
 
   if (path === "/v1/phone-sessions" && m === "POST") {
