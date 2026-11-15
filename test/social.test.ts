@@ -116,12 +116,12 @@ describe("accounts", () => {
     expect(codes).toContain(429);
   });
 
-  test("phone token may patch displayName and checkinTime but not proactive; values validated", async () => {
+  test("phone token may patch displayName but not proactive; checkinTime no longer exists (D-52)", async () => {
     const e = boot();
     const p = await phone(e, "지은");
-    expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: "08:30" })).status).toBe(200);
-    expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: "25:00" })).status).toBe(400);
-    expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: null })).status).toBe(200);
+    expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: "08:30" })).status).toBe(400);
+    expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: null })).status).toBe(400);
+    expect(await e.j(await e.call("GET", "/v1/settings", p.phoneToken))).not.toHaveProperty("checkinTime");
     expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { displayName: "하늘" })).status).toBe(200);
     expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { proactive: "off" })).status).toBe(403);
   });
@@ -258,7 +258,7 @@ describe("push", () => {
     expect(carSock.of("friend_message")[0]).toMatchObject({ fromName: "민수", text: "먼저 갈게" });
   });
 
-  test("friend_arrived: only when the sender enabled shareArrival for that friend, place = destination name only", async () => {
+  test("friend_arrived: only when the sender enabled shareArrival; carries no place, and the spoken line has no destination (D-53)", async () => {
     const e = boot();
     const a = await car(e, "install-aaaa1", "지은");
     const b = await phone(e, "민수");
@@ -278,8 +278,26 @@ describe("push", () => {
     carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 40, arrived: false, destinationName: "카페 하늘" } });
     carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, arrived: true } });
     await bInbox.until(() => bInbox.of("friend_arrived").length === 1);
-    expect(bInbox.of("friend_arrived")[0]).toMatchObject({ type: "friend_arrived", fromName: "지은", place: "카페 하늘" });
-    expect(typeof bInbox.of("friend_arrived")[0]!.id).toBe("string");
+    expect(bInbox.of("friend_arrived")[0]).toEqual({ type: "friend_arrived", id: expect.any(String), fromName: "지은" });
+    await Bun.sleep(100);
+    expect(JSON.stringify(bInbox.frames)).not.toContain("카페 하늘");
+  });
+
+  test("friend_arrived to a car is spoken as '<name>가 도착했대' without the destination", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const b = await car(e, "install-bbbb2", "민수");
+    await befriend(e, a, b);
+    const mine = (await friendsOf(e, a))[0]!;
+    await e.call("PATCH", `/v1/friends/${mine.id}`, a, { shareArrival: true });
+    const bSock = await carSocket(e, b);
+    const aSock = await carSocket(e, a);
+    aSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    aSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 40, destinationName: "카페 하늘" } });
+    aSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, arrived: true } });
+    await bSock.until(() => bSock.of("reply.end").length === 1);
+    expect(bSock.of("friend_arrived")[0]).toEqual({ type: "friend_arrived", id: expect.any(String), fromName: "지은", });
+    expect(bSock.of("reply.end")[0]!.text).toBe("지은이가 도착했대!");
   });
 
   test("coordinates are never used as a place name", async () => {
@@ -295,7 +313,7 @@ describe("push", () => {
     carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 40, destinationName: "37.51234, 127.05678" } });
     carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, arrived: true } });
     await bInbox.until(() => bInbox.of("friend_arrived").length === 1);
-    expect(bInbox.of("friend_arrived")[0]!.place).toBeUndefined();
+    expect(bInbox.of("friend_arrived")[0]).not.toHaveProperty("place");
   });
 });
 
@@ -359,6 +377,72 @@ describe("trip end and diary", () => {
     const theirs = await e.j<{ entries: unknown[]; summary: string | null }>(await e.call("GET", "/v1/diary", other.phoneToken));
     expect(theirs.entries).toEqual([]);
     expect(theirs.summary).toBeNull();
+  });
+});
+
+describe("D-53 consent withdrawal and memory-off", () => {
+  const paired = async (e: Env, a: string) => {
+    const pc = (await e.j<{ pairCode: string }>(await e.call("POST", "/v1/pairings", a))).pairCode;
+    return (await e.j<{ phoneToken: string }>(await e.call("POST", `/v1/pairings/${pc}/claim`, undefined, { record: true, memory: true }))).phoneToken;
+  };
+  const memConsent = (e: Env, token: string, channel: "car" | "phone") => e.call("POST", "/v1/consents", token, { type: "memory", version: "1", granted: true, channel });
+  const drive = async (e: Env, a: string) => {
+    const s = await carSocket(e, a);
+    s.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    s.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30 } });
+    s.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    return s;
+  };
+
+  test("withdrawing memory consent deletes diary and friend messages (sent + received) at once; others' copies stay", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    await memConsent(e, a, "car");
+    const b = await phone(e, "민수");
+    await memConsent(e, b.phoneToken, "phone");
+    const { friend } = await befriend(e, a, b.phoneToken);
+    const mine = (await friendsOf(e, a))[0]!;
+    await e.call("POST", "/v1/messages", b.phoneToken, { toFriendId: friend.id, text: "받는 글" });
+    await e.call("POST", "/v1/messages", a, { toFriendId: mine.id, text: "보내는 글" });
+    const today = new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 10);
+    const before = await e.j<{ entries: unknown[] }>(await e.call("GET", `/v1/diary?date=${today}`, a));
+    expect(before.entries.length).toBe(2);
+    expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", a))).messages.length).toBe(2);
+    expect((await e.call("DELETE", "/v1/consents/memory", a)).status).toBe(204);
+    const after = await e.j<{ entries: unknown[]; summary: unknown }>(await e.call("GET", `/v1/diary?date=${today}`, a));
+    expect(after.entries).toEqual([]);
+    expect(after.summary).toBeNull();
+    expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", a))).messages).toEqual([]);
+    expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", b.phoneToken))).messages).toEqual([]);
+    expect((await e.j<{ entries: unknown[] }>(await e.call("GET", `/v1/diary?date=${today}`, b.phoneToken))).entries.length).toBe(2);
+  });
+
+  test("POST consent granted:false (record) also purges diary and messages", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    await memConsent(e, a, "car");
+    const b = await phone(e, "민수");
+    const { friend } = await befriend(e, a, b.phoneToken);
+    await e.call("POST", "/v1/messages", b.phoneToken, { toFriendId: friend.id, text: "안녕" });
+    expect((await e.call("POST", "/v1/consents", a, { type: "record", version: "1", granted: false, channel: "car" })).status).toBe(200);
+    expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", a))).messages).toEqual([]);
+  });
+
+  test("memory saving OFF: no diary entries or summary, but trip_done is still sent", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const phoneTok = await paired(e, a);
+    expect((await e.call("PATCH", "/v1/settings", a, { memoryEnabled: false })).status).toBe(200);
+    const stream = await inbox(e, phoneTok);
+    const carSock = await drive(e, a);
+    await stream.until(() => stream.of("trip_done").length === 1);
+    await Bun.sleep(100);
+    expect(stream.of("diary_ready")).toEqual([]);
+    const today = String(stream.of("trip_done")[0]!.date);
+    const d = await e.j<{ entries: unknown[]; summary: unknown }>(await e.call("GET", `/v1/diary?date=${today}`, phoneTok));
+    expect(d.entries).toEqual([]);
+    expect(d.summary).toBeNull();
+    carSock.ws.close();
   });
 });
 

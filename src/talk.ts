@@ -795,7 +795,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const place = placeName(cur.destinationName);
     if (place) {
       c.tripPlace = place;
-      social.store.addPlace(d.installId, date, place);
+      social.place(d.installId, date, place);
     }
     if (wiperOn(cur.wiper) && !wiperOn(prev.wiper)) social.note(d.installId, "rain");
     if (cur.headlight === true && prev.headlight !== true && isNight(now)) social.note(d.installId, "night");
@@ -814,7 +814,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (!c.tripActive) return;
     if (cur.arrived === true && prev.arrived !== true && !c.arrivedSent) {
       c.arrivedSent = true;
-      social.arrived(d.installId, c.tripPlace ?? null);
+      social.arrived(d.installId);
     }
     if (cur.gear !== "P") return;
     const doorOpened = (cur.driverDoorOpen === true && prev.driverDoorOpen !== true) || (cur.doorOpen === true && prev.doorOpen !== true);
@@ -833,7 +833,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (c.tripHold) clock.clearTimeout(c.tripHold);
     c.tripHold = undefined;
     const place = c.tripPlace ?? null;
-    if (!c.arrivedSent && place) opts.social.arrived(ws.data.installId, place);
+    if (!c.arrivedSent && place) opts.social.arrived(ws.data.installId);
     c.arrivedSent = true;
     opts.social.tripDone(ws.data.installId, place);
   }

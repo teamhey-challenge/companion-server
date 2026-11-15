@@ -33,12 +33,12 @@ const MAX_EVENTS_PER_CAR = 200;
 /** 꾸미기(D-41). Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니(기본: 지금 보이는 모습)·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
 export interface Look { bodyColor: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1 }
 export const LOOK_MAX = { bodyColor: 1, hat: 2, neck: 1 } as const;
-export type ServerSettings = Settings & Look & { displayName: string | null; checkinTime: string | null };
+export type ServerSettings = Settings & Look & { displayName: string | null };
 export type ServerSettingsPatch = Partial<ServerSettings>;
 export const MAX_DISPLAY_NAME_CHARS = 20;
-export const CHECKIN_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-export const DEFAULT_SETTINGS: ServerSettings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: null, checkinTime: null };
+
+export const DEFAULT_SETTINGS: ServerSettings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: null };
 
 export type Principal = { kind: "car" | "phone"; installId: string };
 
@@ -76,7 +76,7 @@ export class ApiStore {
     if (!cols.includes("hat")) db.run("ALTER TABLE settings ADD COLUMN hat INTEGER NOT NULL DEFAULT 1");
     if (!cols.includes("neck")) db.run("ALTER TABLE settings ADD COLUMN neck INTEGER NOT NULL DEFAULT 0");
     if (!cols.includes("display_name")) db.run("ALTER TABLE settings ADD COLUMN display_name TEXT");
-    if (!cols.includes("checkin_time")) db.run("ALTER TABLE settings ADD COLUMN checkin_time TEXT");
+    // checkin_time(D-52 이전 열)은 더 이상 읽거나 쓰지 않는다. 옛 DB 의 NULL 허용 열은 그대로 둔다.
     db.run("CREATE TABLE IF NOT EXISTS phone_accounts (account_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL)");
     db.run(`CREATE TABLE IF NOT EXISTS vehicle_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
@@ -274,15 +274,15 @@ export class ApiStore {
 
   // ---- 설정 ----
   getSettings(installId: string): ServerSettings {
-    const r = this.db.query("SELECT proactive, memory_enabled, speech, nickname, body_color, hat, neck, display_name, checkin_time FROM settings WHERE install_id = ?1").get(installId) as
+    const r = this.db.query("SELECT proactive, memory_enabled, speech, nickname, body_color, hat, neck, display_name FROM settings WHERE install_id = ?1").get(installId) as
       | {
           proactive: Settings["proactive"]; memory_enabled: number; speech: Settings["speech"]; nickname: string | null;
-          body_color: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1; display_name: string | null; checkin_time: string | null;
+          body_color: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1; display_name: string | null;
         } | null;
     if (!r) return { ...DEFAULT_SETTINGS };
     return {
       proactive: r.proactive, memoryEnabled: r.memory_enabled === 1, speech: r.speech, nickname: r.nickname,
-      bodyColor: r.body_color, hat: r.hat, neck: r.neck, displayName: r.display_name, checkinTime: r.checkin_time,
+      bodyColor: r.body_color, hat: r.hat, neck: r.neck, displayName: r.display_name,
     };
   }
 
@@ -290,10 +290,10 @@ export class ApiStore {
     const s = { ...this.getSettings(installId), ...patch };
     this.db
       .query(
-        `INSERT INTO settings (install_id, proactive, memory_enabled, speech, nickname, body_color, hat, neck, display_name, checkin_time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(install_id) DO UPDATE SET proactive = ?2, memory_enabled = ?3, speech = ?4, nickname = ?5, body_color = ?6, hat = ?7, neck = ?8, display_name = ?9, checkin_time = ?10`,
+        `INSERT INTO settings (install_id, proactive, memory_enabled, speech, nickname, body_color, hat, neck, display_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(install_id) DO UPDATE SET proactive = ?2, memory_enabled = ?3, speech = ?4, nickname = ?5, body_color = ?6, hat = ?7, neck = ?8, display_name = ?9`,
       )
-      .run(installId, s.proactive, s.memoryEnabled ? 1 : 0, s.speech, s.nickname, s.bodyColor, s.hat, s.neck, s.displayName, s.checkinTime);
+      .run(installId, s.proactive, s.memoryEnabled ? 1 : 0, s.speech, s.nickname, s.bodyColor, s.hat, s.neck, s.displayName);
     return s;
   }
 

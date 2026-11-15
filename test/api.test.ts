@@ -262,7 +262,8 @@ test("public pairing lookup is rate limited per IP", async () => {
 test("settings PATCH pushes to the hub and validates input", async () => {
   const { call, car, pushed } = boot();
   const a = await car("install-aaaa1");
-  expect(await (await call("GET", "/v1/settings", a)).json()).toEqual({ proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: null, checkinTime: null });
+  expect(await (await call("GET", "/v1/settings", a)).json()).toEqual({ proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: null });
+  expect((await call("PATCH", "/v1/settings", a, { checkinTime: "08:30" })).status).toBe(400);
   expect((await call("PATCH", "/v1/settings", a, { proactive: "high" })).status).toBe(200);
   expect(pushed.length).toBe(1);
   expect((await call("PATCH", "/v1/settings", a, { proactive: "loud" })).status).toBe(400);

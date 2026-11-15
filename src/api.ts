@@ -11,7 +11,7 @@ import {
   type PairingStatus,
 } from "../shared/packages/protocol/src/index";
 import type { ApiStore, Principal, ServerSettings, ServerSettingsPatch } from "./api-store";
-import { CHECKIN_TIME_RE, LOOK_MAX, MAX_DISPLAY_NAME_CHARS, characterFor } from "./api-store";
+import { LOOK_MAX, MAX_DISPLAY_NAME_CHARS, characterFor } from "./api-store";
 import { bearer } from "./auth";
 import type { Social } from "./social";
 import { INVITE_CODE_RE, MAX_MESSAGE_CHARS } from "./social-store";
@@ -26,9 +26,9 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_VEHICLE_EVENTS = 50;
 const MAX_MEMORY_PAGE = 100;
 const DEFAULT_MEMORY_PAGE = 50;
-const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname", "bodyColor", "hat", "neck", "displayName", "checkinTime"] as const;
+const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname", "bodyColor", "hat", "neck", "displayName"] as const;
 /** 폰 토큰이 바꿀 수 있는 설정(공유 규칙의 speech 에 더해). */
-const PHONE_KEYS: readonly string[] = [...PHONE_SETTINGS_KEYS, "displayName", "checkinTime"];
+const PHONE_KEYS: readonly string[] = [...PHONE_SETTINGS_KEYS, "displayName"];
 
 export interface ApiDeps {
   api: ApiStore;
@@ -99,11 +99,6 @@ function parsePatch(body: unknown): ServerSettingsPatch | null {
       patch[k] = t;
       continue;
     }
-    if (k === "checkinTime") {
-      if (v !== null && !(typeof v === "string" && CHECKIN_TIME_RE.test(v))) return null;
-      patch[k] = v;
-      continue;
-    }
     patch[k] = v;
   }
   return Object.keys(patch).length > 0 ? (patch as ServerSettingsPatch) : null;
@@ -172,6 +167,8 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     // 채널은 토큰 종류와 일치해야 한다
     if ((b.channel as ConsentChannel) !== who.kind) return bad("channel_mismatch");
     d.api.setConsent(installId, b.type as ConsentType, b.version, b.granted);
+    // D-53: 기억·녹음 동의 철회는 일기와 친구 메시지도 바로 지운다.
+    if (!b.granted && (b.type === "record" || b.type === "memory")) d.social.store.deleteAccountData(installId);
     d.consentChanged?.(installId, !b.granted);
     return json({ consents: d.api.listConsents(installId) });
   }
@@ -179,6 +176,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   if (consent && m === "DELETE") {
     if (!(CONSENT_TYPES as readonly string[]).includes(consent[1]!)) return bad();
     d.api.withdrawConsent(installId, consent[1] as ConsentType);
+    if (consent[1] === "record" || consent[1] === "memory") d.social.store.deleteAccountData(installId);
     d.consentChanged?.(installId, true);
     return noContent();
   }
