@@ -31,13 +31,13 @@ export function normalizeMemoryText(text: string): string {
 export const CHARACTER_NAME = "헤이파리";
 const MAX_EVENTS_PER_CAR = 200;
 
-/** 꾸미기(D-41). Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
+/** 꾸미기(D-41). Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니(기본: 지금 보이는 모습)·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
 export interface Look { bodyColor: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1 }
 export const LOOK_MAX = { bodyColor: 1, hat: 2, neck: 1 } as const;
 export type ServerSettings = Settings & Look;
 export type ServerSettingsPatch = Partial<ServerSettings>;
 
-export const DEFAULT_SETTINGS: ServerSettings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 0, neck: 0 };
+export const DEFAULT_SETTINGS: ServerSettings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0 };
 
 export type Principal = { kind: "car" | "phone"; installId: string };
 
@@ -72,7 +72,7 @@ export class ApiStore {
       install_id TEXT PRIMARY KEY, proactive TEXT NOT NULL, memory_enabled INTEGER NOT NULL, speech TEXT NOT NULL, nickname TEXT)`);
     const cols = (db.query("PRAGMA table_info(settings)").all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes("body_color")) db.run("ALTER TABLE settings ADD COLUMN body_color INTEGER");
-    if (!cols.includes("hat")) db.run("ALTER TABLE settings ADD COLUMN hat INTEGER NOT NULL DEFAULT 0");
+    if (!cols.includes("hat")) db.run("ALTER TABLE settings ADD COLUMN hat INTEGER NOT NULL DEFAULT 1");
     if (!cols.includes("neck")) db.run("ALTER TABLE settings ADD COLUMN neck INTEGER NOT NULL DEFAULT 0");
     db.run(`CREATE TABLE IF NOT EXISTS vehicle_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
