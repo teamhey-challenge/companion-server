@@ -35,6 +35,8 @@ export interface ServerOptions {
   llmDeadlineMs?: number;
   /** 기억 담은 먼저 말(도착·첫 인사)이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
   proactiveLlmFirstMs?: number;
+  /** 온보딩 고래 맞장구가 첫 글자를 이 시간 안에 못 받으면 고정 문장(기본 2.5초). 시험에서만 바꾼다. */
+  onboardingAckFirstMs?: number;
   /** 초대 링크 앞부분(PASSENGER_WEB_URL). 끝 슬래시는 뗀다. */
   passengerWebUrl?: string;
   /** 기어 P 를 두면 운전이 끝난 것으로 보는 시간(기본 60초). 시험에서만 바꾼다. */
@@ -103,7 +105,7 @@ export function createServer(o: ServerOptions): RunningServer {
     return json(res);
   }
 
-  const talk = talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs, llmDeadlineMs: o.llmDeadlineMs, proactiveLlmFirstMs: o.proactiveLlmFirstMs, social, tripHoldMs: o.tripHoldMs });
+  const talk = talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs, llmDeadlineMs: o.llmDeadlineMs, proactiveLlmFirstMs: o.proactiveLlmFirstMs, ...(o.onboardingAckFirstMs !== undefined ? { onboardingAckFirstMs: o.onboardingAckFirstMs } : {}), social, tripHoldMs: o.tripHoldMs });
 
   const server = Bun.serve<WsData>({
     port: o.port,

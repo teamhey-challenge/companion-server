@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Observability } from "../src/observe";
 import { buildSystem, MEMORY_EXTRACT_SYSTEM } from "../src/llm/persona";
-import { cleanOnboardingAnswer, parseOnboardingFrame, parseOnboardingName, WHALE_LINES } from "../src/onboarding";
+import { cleanOnboardingAnswer, CONSENT_FREE_STEPS, HEYRI_LINES, ONBOARDING_STEPS, onboardingPieces, parseOnboardingFrame, parseOnboardingName, WHALE_LINES } from "../src/onboarding";
 import { createServer, type RunningServer } from "../src/server";
 import { FakeTts, loadTtsConfig, makeTts } from "../src/tts";
 
@@ -24,17 +24,28 @@ interface Boot {
   prompts: string[];
 }
 
-function boot(): Boot {
+interface BootOpts {
+  /** 맞장구 LLM(고래 안내자 지시)을 어떻게 만들지. 기본은 짧은 문장 */
+  ack?: (system: string, signal: AbortSignal | null | undefined) => Promise<Response>;
+  tts?: FakeTts;
+  ackFirstMs?: number;
+}
+const ACK_LINE = "출퇴근길이구나. 매일 같이 다니겠네.";
+
+function boot(o: BootOpts = {}): Boot {
   const prompts: string[] = [];
-  const tts = new FakeTts();
+  const tts = o.tts ?? new FakeTts();
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:", tts,
+    ...(o.ackFirstMs !== undefined ? { onboardingAckFirstMs: o.ackFirstMs } : {}),
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     fetchImpl: (async (_u: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
       const system = body.messages[0]!.content;
       prompts.push(system);
-      return new Response(sse(system.includes("[기억 추출]") ? "NONE" : GREETING), { headers: { "content-type": "text/event-stream" } });
+      const stream = { headers: { "content-type": "text/event-stream" } };
+      if (system.includes("고래 안내자")) return o.ack ? o.ack(system, init.signal) : new Response(sse(ACK_LINE), stream);
+      return new Response(sse(system.includes("[기억 추출]") ? "NONE" : GREETING), stream);
     }) as unknown as typeof fetch,
   });
   servers.push(s);
@@ -181,10 +192,149 @@ describe("onboarding flow on /v1/talk", () => {
   });
 });
 
+describe("D-48 script, acks, skip, consent gating", () => {
+  test("whale lines match the planner mock and keep the whale name out", () => {
+    expect(WHALE_LINES.whale_intro.startsWith("안녕, 나는 빛바다를 지키는 고래야.")).toBe(true);
+    expect(WHALE_LINES.q1).toBe("먼저, 뭐라고 불러 줄까?");
+    expect(WHALE_LINES.q3).toBe("차 안에서는 어떤 얘기가 좋아?");
+    expect(WHALE_LINES.skip).toBe("괜찮아, 다음에 알려 줘.");
+    expect(ONBOARDING_STEPS).toEqual(["whale_intro", "lights", "q1", "q2", "q3", "skip", "found", "greeting", "memory", "dress", "qr", "done"]);
+    expect(onboardingPieces().length).toBeGreaterThan(10);
+  });
+
+  test("new whale and heyri steps speak the mock lines with the right voice, without consent", async () => {
+    const b = boot();
+    const car = await Car.connect(b); // no consent at all
+    for (const step of ["whale_intro", "lights", "skip", "found"] as const) {
+      const end = await car.step(step);
+      expect(end.text).toBe(WHALE_LINES[step]);
+    }
+    const whaleCalls = b.tts.voices.length;
+    expect(b.tts.voices.every((v) => v === "whale")).toBe(true);
+    for (const step of ["dress", "qr", "done"] as const) {
+      const end = await car.step(step);
+      expect(end.text).toBe(HEYRI_LINES[step].banmal);
+      expect(car.of("onboarding").at(-1)).toMatchObject({ step, text: HEYRI_LINES[step].banmal });
+    }
+    expect(b.tts.voices.slice(whaleCalls).every((v) => v === undefined)).toBe(true);
+    expect(car.of("error")).toEqual([]);
+    expect(b.prompts).toEqual([]); // nothing went to the LLM
+  });
+
+  test("pre-consent: intro allowed, question/greeting/answer rejected", async () => {
+    const b = boot();
+    const car = await Car.connect(b);
+    await car.step("whale_intro");
+    for (const step of ["q1", "q2", "q3", "greeting"] as const) expect(CONSENT_FREE_STEPS[step]).toBeUndefined();
+    car.send({ type: "onboarding", step: "q2" });
+    car.send({ type: "onboarding", step: "greeting" });
+    car.send({ type: "onboarding.answer", step: "q1", text: "민수", reply: true });
+    await car.until(() => car.of("error").length === 3);
+    expect(car.of("error").every((e) => e.code === "consent_required")).toBe(true);
+    expect(car.of("onboarding.ack")).toEqual([]);
+    expect(b.prompts).toEqual([]);
+    const mem = ((await (await car.api("GET", "/v1/memory?limit=50")).json()) as { items: unknown[] }).items;
+    expect(mem).toEqual([]);
+  });
+
+  test("memory line: remembers with memory on, never promises it with memory off", async () => {
+    const on = boot();
+    const carOn = await Car.connect(on);
+    await carOn.grant(true);
+    expect((await carOn.step("memory")).text).toBe(HEYRI_LINES.memory.banmal);
+
+    const off = boot();
+    const carOff = await Car.connect(off);
+    await carOff.grant(false);
+    const end = await carOff.step("memory");
+    expect(end.text).toBe(HEYRI_LINES.memoryOff.banmal);
+    expect(String(end.text)).toContain("기억 저장을 켜면 이렇게 기억해");
+    expect(String(end.text)).not.toContain("기억해 둘게, 언제든");
+  });
+
+  test("reply:true answer → ack frame, then whale ack line in the whale voice (LLM)", async () => {
+    const b = boot();
+    const car = await Car.connect(b);
+    await car.grant();
+    car.send({ type: "onboarding.answer", step: "q2", text: "주로 출퇴근할 때 타", reply: true });
+    await car.until(() => car.of("reply.end").length === 1);
+    expect(car.of("onboarding.ack")[0]).toMatchObject({ step: "q2", ok: true });
+    expect(car.of("onboarding").at(-1)).toMatchObject({ step: "ack", for: "q2" });
+    expect(car.of("reply.end")[0]!.text).toBe(ACK_LINE);
+    expect(b.tts.voices.length).toBeGreaterThan(0);
+    expect(b.tts.voices.every((v) => v === "whale")).toBe(true);
+  });
+
+  test("without reply flag nothing is spoken after an answer (old clients unchanged)", async () => {
+    const b = boot();
+    const car = await Car.connect(b);
+    await car.grant();
+    await car.answer("q2", "회사");
+    await Bun.sleep(100);
+    expect(car.of("reply.end")).toEqual([]);
+  });
+
+  test("ack LLM slower than the limit → fixed fallback line, still whale voice", async () => {
+    const b = boot({
+      ackFirstMs: 80,
+      ack: (_s, signal) => {
+        const { promise, reject } = Promise.withResolvers<Response>();
+        signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        return promise;
+      },
+    });
+    const car = await Car.connect(b);
+    await car.grant();
+    car.send({ type: "onboarding.answer", step: "q3", text: "캠핑 얘기", reply: true });
+    await car.until(() => car.of("reply.end").length === 1, 4000);
+    expect(car.of("reply.end")[0]!.text).toBe("좋아, 그 얘기 많이 하자.");
+    expect(b.tts.voices.every((v) => v === "whale")).toBe(true);
+    expect(car.of("error")).toEqual([]);
+  });
+
+  test("ack LLM error → fixed fallback line", async () => {
+    const b = boot({ ack: async () => new Response("boom", { status: 500 }) });
+    const car = await Car.connect(b);
+    await car.grant();
+    car.send({ type: "onboarding.answer", step: "q2", text: "회사", reply: true });
+    await car.until(() => car.of("reply.end").length + car.of("error").length >= 1, 4000);
+    expect(car.of("reply.end")[0]!.text).toBe("그렇구나. 같이 다니자.");
+  });
+
+  test("unrecognised answer with reply:true → ok:false skipped, whale says the skip line and nothing is stored", async () => {
+    const b = boot();
+    const car = await Car.connect(b);
+    await car.grant();
+    car.send({ type: "onboarding.answer", step: "q2", text: "", reply: true });
+    await car.until(() => car.of("reply.end").length === 1);
+    expect(car.of("onboarding.ack")[0]).toMatchObject({ step: "q2", ok: false, skipped: true });
+    expect(car.of("onboarding").at(-1)).toMatchObject({ step: "skip", text: WHALE_LINES.skip });
+    expect(car.of("reply.end")[0]!.text).toBe(WHALE_LINES.skip);
+    expect(b.tts.voices.every((v) => v === "whale")).toBe(true);
+    expect(b.prompts).toEqual([]);
+    const mem = ((await (await car.api("GET", "/v1/memory?limit=50")).json()) as { items: unknown[] }).items;
+    expect(mem).toEqual([]);
+  });
+
+  test("TTS failure still delivers the onboarding frame with text and a text-only reply", async () => {
+    const tts = new FakeTts();
+    tts.synth = async () => {
+      throw new Error("tts down");
+    };
+    const b = boot({ tts });
+    const car = await Car.connect(b);
+    const end = await car.step("whale_intro");
+    expect(car.of("onboarding")[0]).toMatchObject({ step: "whale_intro", text: WHALE_LINES.whale_intro });
+    expect(car.of("reply.start")[0]).toMatchObject({ audio: "none" });
+    expect(end.text).toBe(WHALE_LINES.whale_intro);
+  });
+});
+
 describe("onboarding helpers", () => {
   test("parseOnboardingFrame validates and ignores other frames", () => {
     expect(parseOnboardingFrame('{"type":"onboarding","step":"q1"}')).toEqual({ kind: "step", step: "q1" });
-    expect(parseOnboardingFrame('{"type":"onboarding.answer","step":"q3","text":"음악"}')).toEqual({ kind: "answer", step: "q3", text: "음악" });
+    expect(parseOnboardingFrame('{"type":"onboarding.answer","step":"q3","text":"음악"}')).toEqual({ kind: "answer", step: "q3", text: "음악", reply: false });
+    expect(parseOnboardingFrame('{"type":"onboarding.answer","step":"q3","text":"음악","reply":true}')).toEqual({ kind: "answer", step: "q3", text: "음악", reply: true });
     expect(parseOnboardingFrame('{"type":"onboarding.answer","step":"greeting","text":"x"}')).toBeNull();
     expect(parseOnboardingFrame('{"type":"onboarding","step":"nope"}')).toBeNull();
     expect(parseOnboardingFrame('{"type":"ctx","ctx":{}}')).toBeNull();
@@ -201,13 +351,21 @@ describe("onboarding helpers", () => {
 
 describe("whale voice config", () => {
   test("ONBOARDING_VOICE_ID is read from the environment/secrets and never hardcoded; unset logs the fallback once", () => {
-    const cfg = loadTtsConfig({ COMPANION_TTS_PROVIDER: "fake", ONBOARDING_VOICE_ID: "voc_whale_test" });
-    expect(cfg.onboardingVoiceId).toBe("voc_whale_test");
-    expect(loadTtsConfig({ COMPANION_TTS_PROVIDER: "fake", COMPANION_SECRETS_FILE: "/nonexistent" }).onboardingVoiceId).toBeUndefined();
-    const events: string[] = [];
-    makeTts(loadTtsConfig({ COMPANION_TTS_PROVIDER: "fake", COMPANION_SECRETS_FILE: "/nonexistent" }), new Observability((l) => events.push(l)));
-    expect(events.join("\n")).toContain("tts.whale_voice_fallback");
-    expect(events.join("\n")).not.toContain("voc_");
+    // loadSecrets reads process.env.COMPANION_SECRETS_FILE (not the env argument): point it at nothing so this host's real secrets file cannot leak in.
+    const prev = process.env.COMPANION_SECRETS_FILE;
+    process.env.COMPANION_SECRETS_FILE = "/nonexistent";
+    try {
+      const cfg = loadTtsConfig({ COMPANION_TTS_PROVIDER: "fake", ONBOARDING_VOICE_ID: "voc_whale_test" });
+      expect(cfg.onboardingVoiceId).toBe("voc_whale_test");
+      expect(loadTtsConfig({ COMPANION_TTS_PROVIDER: "fake" }).onboardingVoiceId).toBeUndefined();
+      const events: string[] = [];
+      makeTts(loadTtsConfig({ COMPANION_TTS_PROVIDER: "fake" }), new Observability((l) => events.push(l)));
+      expect(events.join("\n")).toContain("tts.whale_voice_fallback");
+      expect(events.join("\n")).not.toContain("voc_");
+    } finally {
+      if (prev === undefined) delete process.env.COMPANION_SECRETS_FILE;
+      else process.env.COMPANION_SECRETS_FILE = prev;
+    }
   });
 });
 

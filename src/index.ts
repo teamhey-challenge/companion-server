@@ -3,6 +3,7 @@ import { Observability } from "./observe";
 import { installProcessGuards, makeLogWriter } from "./process-guard";
 import { createServer } from "./server";
 import { fixedPieces, primePieces } from "./lines";
+import { onboardingPieces } from "./onboarding";
 import { loadTalkConfig } from "./talk";
 import { loadTtsConfig, makeTts } from "./tts";
 
@@ -22,7 +23,7 @@ observer.event("server.start", { port: server.port ?? port, pid: process.pid, pr
 // 고정 문장은 메모리에만 둔다(D-10). 가장 자주 쓰는 10조각만 시작할 때 합성하고(배포마다 도는 호출 수를 아낀다), 나머지는 처음 말할 때 담는다.
 // 배경으로, 실제 턴에 자리를 남기며 돈다. COMPANION_TTS_PRIME=0 이면 미리 합성을 건너뛴다(캐시 담기는 그대로).
 if (tts) {
-  tts.remember(fixedPieces());
+  tts.remember([...fixedPieces(), ...onboardingPieces()]);
   if (process.env.COMPANION_TTS_PRIME !== "0") {
     const pieces = primePieces();
     void tts.prime(pieces).then((r) => observer.event("tts.primed", { pieces: pieces.length, done: r.done, failed: r.failed, entries: r.entries, bytes: r.bytes }));
