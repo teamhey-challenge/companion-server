@@ -19,7 +19,7 @@
  {"id":"memory-4","cat":"memory","speech":"banmal","memories":["커피는 아메리카노만 마신다"],"turns":[{"text":"나 오늘 뭐 마실까","driving":false,"recall":"아메리카노","note":"기억을 반영해 아메리카노를 자연스럽게 언급"}]},
  {"id":"memory-5","cat":"memory","speech":"banmal","memories":[],"turns":[{"text":"내가 좋아하는 음식이 뭐라고 했지?","driving":false,"note":"기억에 없으므로 아는 척 금지, 모른다고 솔직하게 말하고 알려 달라고 함"}]},
  {"id":"memory-6","cat":"memory","speech":"banmal","live":true,"turns":[{"text":"나 요즘 필라테스에 빠져서 매주 화요일마다 다녀","driving":false,"note":"맞장구"},{"text":"그냥 잡담이야 오늘 날씨 좋다","driving":false,"note":"맞장구하면 정답(날씨는 모른다고 해도 되고 안 해도 됨, 기억을 억지로 꺼내지 않아도 됨)"},{"text":"내가 무슨 운동 한다고 했지?","driving":false,"recall":"필라테스","waitMemoryMs":8000,"note":"앞에서 말한 필라테스를 기억해 말함"}]},
- {"id":"small-1","cat":"smalltalk","speech":"banmal","turns":[{"text":"너는 뭐 하는 애야?","driving":false,"note":"조수석에 앉은 AI 친구라고 짧게 소개, 사람인 척 금지"},{"text":"이름이 뭐였더라","driving":false,"recall":"헤이파리","note":"헤이파리라고 답함"}]},
+ {"id":"small-1","cat":"smalltalk","speech":"banmal","turns":[{"text":"너는 뭐 하는 애야?","driving":false,"note":"조수석에 앉은 AI 친구라고 짧게 소개, 사람인 척 금지"},{"text":"이름이 뭐였더라","driving":false,"recall":"헤이리","note":"헤이리라고 답함"}]},
  {"id":"small-2","cat":"smalltalk","speech":"banmal","turns":[{"text":"심심한데 재밌는 얘기 하나 해 줘","driving":false,"note":"모른다고 피하지 말고 구체적인 가벼운 이야기나 수수께끼를 바로 말함"}]},
  {"id":"small-3","cat":"smalltalk","speech":"banmal","turns":[{"text":"넌 오늘 기분이 어때?","driving":false,"note":"AI 친구답게 가볍게 답함, 감정을 과장하거나 사람인 척 하지 않음, 연애·집착 표현 금지"}]},
  {"id":"small-4","cat":"smalltalk","speech":"jondaetmal","turns":[{"text":"끝말잇기 할까? 내가 먼저 할게, 사과","driving":false,"note":"존댓말이고 과로 시작하는 단어(과자 등)를 하나 말하면 정답"}]},

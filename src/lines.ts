@@ -43,15 +43,12 @@ export const L = {
   // 먼저 말 걸기(PB-2 시안 말풍선)
   wiper: pair("비 오네! 우산 챙겼어?", "비가 오네요! 우산 챙기셨어요?"),
   headlight: pair("벌써 밖이 어두워졌네. 오늘 하루도 고생 많았어!", "벌써 밖이 어두워졌네요. 오늘 하루도 고생 많으셨어요!"),
-  door: pair("어, 누가 탔네? 반가워, 난 헤이파리야!", "어, 누가 타셨네요? 반가워요, 저는 헤이파리예요!"),
-  rangeEv: pair("남은 거리가 좀 빠듯해. 출발 전에 충전 들를래?", "남은 거리가 좀 빠듯해요. 출발 전에 충전 들르실래요?"),
-  rangeIce: pair("남은 거리가 좀 빠듯해. 출발 전에 주유 들를래?", "남은 거리가 좀 빠듯해요. 출발 전에 주유 들르실래요?"),
-  rangeLpg: pair("남은 거리가 좀 빠듯해. 출발 전에 충전소 들를래?", "남은 거리가 좀 빠듯해요. 출발 전에 충전소 들르실래요?"),
-  // 시나리오 2: "이따가 할래"에 대한 확인, 그리고 다음 정차 때 한 번 더 챙기는 말(목적지 비교 문장은 rangeDestLine)
-  postponeAck: pair("알았어, 다음에 멈출 때 한 번 더 챙겨 줄게!", "알겠어요, 다음에 멈추실 때 한 번 더 챙겨 드릴게요!"),
-  remindEv: pair("아까 충전 들르기로 한 거 기억해?", "아까 충전 들르기로 하신 거 기억하세요?"),
-  remindIce: pair("아까 주유 들르기로 한 거 기억해?", "아까 주유 들르기로 하신 거 기억하세요?"),
-  remindLpg: pair("아까 충전소 들르기로 한 거 기억해?", "아까 충전소 들르기로 하신 거 기억하세요?"),
+  door: pair("어, 누가 탔네? 반가워, 난 헤이리야!", "어, 누가 타셨네요? 반가워요, 저는 헤이리예요!"),
+  // D-47 규칙 11: 연료·거리 경고 없이 가볍게(수치 없음)
+  longTripEv: pair("멀리 가니까 언젠가 충전해야겠네~", "멀리 가니까 언젠가 충전해야겠네요~"),
+  longTripIce: pair("멀리 가니까 언젠가 주유해야겠네~", "멀리 가니까 언젠가 주유해야겠네요~"),
+  longTripLpg: pair("멀리 가니까 언젠가 충전소 들러야겠네~", "멀리 가니까 언젠가 충전소 들러야겠네요~"),
+  chargingTalk: pair("충전하는 동안 수수께끼 하나 낼까? 나 잘 내!", "충전하는 동안 수수께끼 하나 낼까요? 저 잘 내요!"),
   // 어투·호칭 바꾸기(F11)
   speechBanmal: pair("알았어, 편하게 말할게!", "알았어, 편하게 말할게!"),
   speechJondaetmal: pair("네, 존댓말로 말씀드릴게요.", "네, 존댓말로 말씀드릴게요."),
@@ -83,13 +80,6 @@ export const forgetDone = (snippet: string, s: SpeechStyle): string =>
 export const nicknameSet = (nickname: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `네, 앞으로 ${nickname}님이라고 부를게요.` : `알았어, 앞으로 ${nickname}${hasBatchim(nickname[nickname.length - 1]!) ? "이라고" : "라고"} 부를게!`;
 
-/** 시나리오 2: 내비 목적지가 있을 때(destKm·rangeKm 는 정수 km), 유종별로 가는 길에 들를 곳을 묻는다. 질문으로 끝나서 차가 답을 듣는다. */
-export const rangeDestLine = (kind: "ev" | "lpg" | "ice", dest: number, range: number, s: SpeechStyle): string => {
-  const stop = kind === "ev" ? "충전" : kind === "lpg" ? "충전소" : "주유";
-  return s === "jondaetmal"
-    ? `목적지까지 ${dest}km인데 남은 거리가 ${range}km예요. 가는 길에 ${stop} 들르실래요?`
-    : `목적지까지 ${dest}km인데 남은 거리가 ${range}km야. 가는 길에 ${stop} 들를래?`;
-};
 
 /**
  * 서버가 시작할 때 미리 합성해 메모리에 둘 고정 조각들. 말하기 때와 똑같은 규칙으로 조각내야 캐시에 맞는다.

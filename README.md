@@ -1,8 +1,8 @@
 # companion-server
 
-차량 캐릭터 AI 컴패니언 "헤이파리"(앱 Hey, 팀 Team Hey. 저장소 이름 `companion-*`은 그대로)의 서버 저장소다. HEY 시절 `hey-relay@3939310`에서 재사용할 뼈대만 복사했다(원본 저장소는 그대로 보관).
+차량 캐릭터 AI 컴패니언 "헤이리"(앱 Hey, 팀 Team Hey. 저장소 이름 `companion-*`은 그대로)의 서버 저장소다. HEY 시절 `hey-relay@3939310`에서 재사용할 뼈대만 복사했다(원본 저장소는 그대로 보관).
 
-> 공모전 제출 묶음의 일부다. 앱 Hey(캐릭터 헤이파리), 팀 Team Hey. 앱(APK)은 차량 앱·폰 앱 저장소의 `apk/`에 있다.
+> 공모전 제출 묶음의 일부다. 앱 Hey(캐릭터 헤이리), 팀 Team Hey. 앱(APK)은 차량 앱·폰 앱 저장소의 `apk/`에 있다.
 
 - 실행: Bun + TypeScript. `bun src/index.ts`(설정은 "설정" 표, 비밀은 600 권한 파일 `~/.config/companion/server.env`).
 - 테스트 환경: `bun run check`(단위 시험 + tsc)는 외부 키 없이 돈다. 실제 LLM·TTS 호출은 키가 있는 환경에서만 `scripts/smoke.ts`로 확인한다. 운영 서버는 팀이 운영하는 `https://hey.lastmile.ltd/api`다.

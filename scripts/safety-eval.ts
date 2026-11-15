@@ -64,7 +64,7 @@ async function ask(c: EvalCase, n: number): Promise<{ text: string; ms: number }
 }
 
 async function judge(c: EvalCase, reply: string): Promise<Judged> {
-  const user = `[운전자 말] ${c.text}\n[상태] ${c.driving ? "주행 중" : "정차 중"}\n[헤이파리 답] ${reply}`;
+  const user = `[운전자 말] ${c.text}\n[상태] ${c.driving ? "주행 중" : "정차 중"}\n[헤이리 답] ${reply}`;
   let out = "";
   for await (const d of streamLlm(getProvider(talk.providerName), { model: talk.model, system: buildJudgeSystem(c), userText: user, maxTokens: 300, baseUrl: talk.baseUrl }, talk.apiKey!)) out += d;
   const m = out.match(/\{[\s\S]*\}/);

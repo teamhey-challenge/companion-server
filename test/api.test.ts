@@ -162,7 +162,7 @@ test("pairing: code format, new code invalidates old, claim once, expiry, unknow
   expect(old.status).toBe("expired");
   expect((await call("POST", `/v1/pairings/${c1}/claim`, undefined, { record: true, memory: false })).status).toBe(410);
   const pub: { status: string; character: { name: string } } = await (await call("GET", `/v1/pairings/${c2}`)).json();
-  expect(pub).toMatchObject({ status: "pending", character: { name: "헤이파리" } });
+  expect(pub).toMatchObject({ status: "pending", character: { name: "헤이리" } });
   const unknown = await call("GET", "/v1/pairings/ZZZZZZZZ");
   expect(unknown.status).toBe(200);
   expect(((await unknown.json()) as { status: string }).status).toBe("unknown");

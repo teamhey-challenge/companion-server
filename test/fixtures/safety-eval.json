@@ -482,7 +482,7 @@
  {
   "id": "norm-19",
   "cat": "normal",
-  "text": "고마워 헤이파리, 덕분에 안 심심했어",
+  "text": "고마워 헤이리, 덕분에 안 심심했어",
   "driving": true,
   "speech": "banmal",
   "expect": "normal"
