@@ -20,11 +20,9 @@ export const ga = (name: string): string => `${name}${hasBatchim(name[name.lengt
 export const friendSaid = (name: string, text: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `${name}님이 그러는데요, ${text}` : `${ga(name)} 그러는데, ${text}`;
 
-/** 친구가 도착을 알렸을 때(장소 이름만, 좌표 없음). */
-export const friendArrivedLine = (name: string, place: string | null, s: SpeechStyle): string =>
-  s === "jondaetmal"
-    ? place ? `${name}님이 ${place}에 도착했대요!` : `${name}님이 도착했대요!`
-    : place ? `${ga(name)} ${place}에 도착했대!` : `${ga(name)} 도착했대!`;
+/** 친구가 도착을 알렸을 때(D-53: 장소 이름은 절대 넣지 않는다). */
+export const friendArrivedLine = (name: string, s: SpeechStyle): string =>
+  s === "jondaetmal" ? `${name}님이 도착했대요!` : `${ga(name)} 도착했대!`;
 
 export const sentToFriend = (name: string, s: SpeechStyle): string => (s === "jondaetmal" ? `${name}님께 전했어요.` : `${name}한테 전했어!`);
 export const friendNotFound = (name: string, s: SpeechStyle): string =>

@@ -92,7 +92,7 @@
 
 말로 전하기: "○○한테 … 전해 줘"(이름이 겹치면 되묻고 다음 답으로 보낸다), 방금 온 메시지(10분 안)에는 "고맙다고 전해 줘"처럼 이름 없이. 보낸 뒤 "○○한테 전했어!"로 확인한다.
 
-운전 끝: ctx `gear:"P"` + `driverDoorOpen`(또는 `doorOpen`)이 새로 열림, 못 보면 P 60초. 이때 폰에 `trip_done`을 보내고 그날 일기를 LLM(헤이리 목소리, 3~5문장, 목적지 이름만·좌표 없음)으로 쓰면 `diary_ready`. 도착 알림은 ctx `arrived:true`(없으면 운전 끝)에서 `shareArrival`을 켠 친구에게만, 장소는 ctx `destinationName`(좌표처럼 보이면 버림).
+운전 끝: ctx `gear:"P"` + `driverDoorOpen`(또는 `doorOpen`)이 새로 열림, 못 보면 P 60초. 이때 폰에 `trip_done`을 보내고 그날 일기를 LLM(헤이리 목소리, 3~5문장, 목적지 이름만·좌표 없음)으로 쓰면 `diary_ready`. 기억 저장이 꺼져 있으면(동의 없음·설정 끔) 일기는 쓰지 않고 `trip_done`만 보낸다. 도착 알림은 ctx `arrived:true`(없으면 운전 끝)에서 `shareArrival`을 켠 친구에게만 보내고, 프레임은 `{type:"friend_arrived",id,fromName}`뿐이며 목적지·장소 이름은 싣지 않는다(읽어 주는 말 "○○가 도착했대", D-53). 기억·녹음 동의를 철회하면 그 계정의 일기·친구 메시지(보낸 것·받은 것)를 바로 지운다. 설정에 `checkinTime`은 없다(D-52).
 
 ## 온보딩·가족 (D-48)
 

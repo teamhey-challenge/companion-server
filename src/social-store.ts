@@ -231,10 +231,16 @@ export class SocialStore {
       .run(account, date, summary);
   }
 
-  /** 계정이 지워지거나 동의가 철회될 때 쓸 수 있게 일기만 지운다. */
-  deleteDiary(account: string): void {
-    this.db.query("DELETE FROM diary_entries WHERE account = ?1").run(account);
-    this.db.query("DELETE FROM diary_summaries WHERE account = ?1").run(account);
+  /** 동의 철회: 일기(항목·요약·재료)와 이 계정이 보내거나 받은 친구 메시지를 모두 지운다. 친구 관계는 그대로 둔다. */
+  deleteAccountData(account: string): void {
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM diary_entries WHERE account = ?1").run(account);
+      this.db.query("DELETE FROM diary_summaries WHERE account = ?1").run(account);
+      this.db.query("DELETE FROM diary_flags WHERE account = ?1").run(account);
+      this.db.query("DELETE FROM diary_places WHERE account = ?1").run(account);
+      this.db.query("DELETE FROM message_reports WHERE message_id IN (SELECT id FROM messages WHERE from_id = ?1 OR to_id = ?1)").run(account);
+      this.db.query("DELETE FROM messages WHERE from_id = ?1 OR to_id = ?1").run(account);
+    })();
   }
 }
 

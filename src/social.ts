@@ -4,7 +4,7 @@ import type { Clock } from "./clock";
 import { friendArrivedLine, friendSaid, tripDoneLine } from "./lines";
 import type { Observability } from "./observe";
 import { checkInput, checkOutput } from "./safety";
-import { MAX_MESSAGE_CHARS, SocialStore, kstDate, type MessageRow } from "./social-store";
+import { MAX_MESSAGE_CHARS, SocialStore, kstDate, type DiaryKind, type MessageRow } from "./social-store";
 import { splitSentences } from "./sentence-cap";
 import type { FriendPush, TalkHub } from "./talk";
 
@@ -79,8 +79,8 @@ export class Social {
       return { ok: false, reason: "blocked" };
     }
     const message = this.store.addMessage(from, toAccount, text);
-    this.store.addDiaryEntry(from, "friend_message", `${this.api.displayNameOf(toAccount)}한테 메시지를 보냈어`);
-    this.store.addDiaryEntry(toAccount, "friend_message", `${this.api.displayNameOf(from)}한테 메시지를 받았어`);
+    this.diary(from, "friend_message", `${this.api.displayNameOf(toAccount)}한테 메시지를 보냈어`);
+    this.diary(toAccount, "friend_message", `${this.api.displayNameOf(from)}한테 메시지를 받았어`);
     this.deliver(message);
     return { ok: true, message };
   }
@@ -99,27 +99,35 @@ export class Social {
     for (const m of this.store.undelivered(account, this.clock.now() - UNDELIVERED_MAX_AGE_MS, REPLAY_MAX)) this.deliver(m);
   }
 
-  /** 도착 알림: 보낸 사람이 켜 둔 친구에게만, 목적지 이름만. */
-  arrived(account: string, place: string | null): void {
+  /** 도착 알림: 보낸 사람이 켜 둔 친구에게만. D-53: "도착했대"만 보내고 장소·목적지 이름은 보내지 않는다. */
+  arrived(account: string): void {
     const fromName = this.api.displayNameOf(account);
     for (const to of this.store.arrivalRecipients(account)) {
-      const frame: { type: string; id: string; fromName: string; place?: string } = { type: "friend_arrived", id: crypto.randomUUID(), fromName };
-      if (place) frame.place = place;
+      const frame = { type: "friend_arrived", id: crypto.randomUUID(), fromName };
       this.inbox.push(to, frame);
-      this.talkHub.deliverFriend(to, { frame, line: (s: SpeechStyle) => friendArrivedLine(fromName, place, s), fromAccount: account });
+      this.talkHub.deliverFriend(to, { frame, line: (s: SpeechStyle) => friendArrivedLine(fromName, s), fromAccount: account });
     }
   }
 
+  /** 기억 저장이 꺼져 있으면(동의 없음·설정 끔) 일기에 아무것도 남기지 않는다(D-53). */
+  private diary(account: string, kind: DiaryKind, text: string): void {
+    if (this.api.memoryAllowed(account)) this.store.addDiaryEntry(account, kind, text);
+  }
+
+  place(account: string, date: string, place: string): void {
+    if (this.api.memoryAllowed(account)) this.store.addPlace(account, date, place);
+  }
+
   tripStarted(account: string): void {
-    this.store.addDiaryEntry(account, "trip_start", "같이 출발했어");
+    this.diary(account, "trip_start", "같이 출발했어");
   }
 
   note(account: string, flag: "rain" | "night"): void {
-    this.store.addFlag(account, kstDate(this.clock.now()), flag);
+    if (this.api.memoryAllowed(account)) this.store.addFlag(account, kstDate(this.clock.now()), flag);
   }
 
   charged(account: string): void {
-    this.store.addDiaryEntry(account, "charging", "충전하면서 쉬었어");
+    this.diary(account, "charging", "충전하면서 쉬었어");
   }
 
   /** 운전이 끝났다: 폰에 한 줄 보내고 오늘 일기를 다시 쓴다. */
@@ -127,13 +135,13 @@ export class Social {
     const now = this.clock.now();
     const date = kstDate(now);
     const text = tripDoneLine(place);
-    this.store.addDiaryEntry(account, "trip_done", text);
+    this.diary(account, "trip_done", text);
     this.inbox.push(account, { type: "trip_done", text, date });
     void this.writeDiary(account, date).catch((e: Error) => this.observer.error("diary.failed", String(e.message).slice(0, 200)));
   }
 
   async writeDiary(account: string, date: string): Promise<string | null> {
-    if (!this.diaryLlm || !this.api.talkAllowed(account)) return null;
+    if (!this.diaryLlm || !this.api.talkAllowed(account) || !this.api.memoryAllowed(account)) return null;
     const entries = this.store.diaryEntries(account, date);
     if (entries.length === 0) return null;
     const trips = entries.filter((e) => e.kind === "trip_done");
