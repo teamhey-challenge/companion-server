@@ -21,6 +21,7 @@ import type { CarStore, TicketBook } from "./store";
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const noContent = () => new Response(null, { status: 204 });
 const bad = (error = "bad_request") => json({ error }, 400);
+const err = (code: string, status: number) => json({ error: code, code }, status);
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -42,6 +43,10 @@ export interface ApiDeps {
   pushSettings?: (installId: string, settings: ServerSettings) => void;
   /** 폰·차가 연결을 해제하면 그 차의 열린 소켓에 pairing(none) 프레임을 보낸다. */
   pushPairing?: (installId: string, status: PairingStatus) => void;
+  /** 폰이 연결되면 그 차의 열린 소켓에 pairing(linked, googleName) 프레임을 보낸다. */
+  pushLinked?: (installId: string, googleName: string | null) => void;
+  /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결(claim)도 받는다. 운영은 꺼 둔다(D-57). */
+  allowNonGoogleClaim?: boolean;
   /** 동의가 바뀌면 그 차의 열린 소켓이 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
   consentChanged?: (installId: string, withdrawn: boolean) => void;
   /** 공개 엔드포인트(코드 조회·claim) 열거 방지용 IP별 제한. true면 거절. */
@@ -114,19 +119,19 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
 
   // ---- 토큰 없는 공개 경로(폰 연결 전) ----
   if (path === "/v1/auth/google" && m === "POST") {
-    if (d.throttled(ip, "gauth", d.publicPerMin)) return json({ error: "rate_limited" }, 429);
+    if (d.throttled(ip, "gauth", d.publicPerMin)) return err("rate_limited", 429);
     if (!d.google) return json({ error: "google_login_unconfigured", code: "google_login_unconfigured" }, 503);
     const b = await readJson(req);
     if (!isObj(b) || typeof b.idToken !== "string" || b.idToken.length === 0 || b.idToken.length > 8192) return bad();
     const v = await d.google.verify(b.idToken);
     if (!v.ok) {
       d.reject(`google.${v.reason}`);
-      return v.reason === "jwks_unavailable" ? json({ error: "google_unavailable" }, 503) : json({ error: "invalid_token" }, 401);
+      return err("google_verify_failed", v.reason === "jwks_unavailable" ? 503 : 401);
     }
     return json(d.api.googleLogin(v.claims.sub, v.claims.givenName));
   }
   if (path === "/v1/phones/register" && m === "POST") {
-    if (d.throttled(ip, "phreg", d.publicPerMin)) return json({ error: "rate_limited" }, 429);
+    if (d.throttled(ip, "phreg", d.publicPerMin)) return err("rate_limited", 429);
     const b = await readJson(req);
     const name = isObj(b) && typeof b.displayName === "string" ? b.displayName.trim() : "";
     if (!name || [...name].length > MAX_DISPLAY_NAME_CHARS) return bad();
@@ -137,30 +142,35 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     const code = pub[1]!;
     const isClaim = pub[2] !== undefined;
     if (isClaim ? m !== "POST" : m !== "GET") return null;
-    if (d.throttled(ip, isClaim ? "claim" : "pairget", d.publicPerMin)) return json({ error: "rate_limited" }, 429);
+    if (d.throttled(ip, isClaim ? "claim" : "pairget", d.publicPerMin)) return err("rate_limited", 429);
     if (!isClaim) {
       const p = PAIR_CODE_RE.test(code) ? d.api.publicPairing(code) : { status: "unknown" as const, installId: null };
       return json({ status: p.status, character: characterFor(p.installId) });
     }
     const body = await readJson(req);
     if (!isObj(body) || typeof body.record !== "boolean" || typeof body.memory !== "boolean") return bad();
-    if (!body.record) return bad("record_required");
-    if (!PAIR_CODE_RE.test(code)) return json({ error: "unknown" }, 404);
+    if (!body.record) return err("record_consent_required", 400);
+    if (!PAIR_CODE_RE.test(code)) return err("unknown", 404);
     const bearerToken = bearer(req.headers);
+    if (bearerToken && d.api.isReplacedToken(bearerToken)) return err("signed_in_elsewhere", 401);
     const googleSub = bearerToken ? d.api.googleSubOfPhoneToken(bearerToken) : null;
+    if (googleSub === null && !d.allowNonGoogleClaim) return err("google_login_required", 403);
     const r = d.api.claimPairing(code, body.record, body.memory, googleSub);
-    if (!r.ok) {
-      if (r.reason === "car_linked_to_other_account" || r.reason === "google_linked_to_other_car") return json({ error: r.reason, code: r.reason }, 409);
-      return json({ error: r.reason }, r.reason === "unknown" ? 404 : r.reason === "claimed" ? 409 : 410);
-    }
+    if (!r.ok) return err(r.reason, r.reason === "unknown" ? 404 : r.reason === "expired" ? 410 : 409);
+    d.pushLinked?.(r.installId, r.googleName);
     return json({ phoneToken: r.phoneToken, character: r.character });
   }
 
-  const known = /^\/v1\/(consents|pairings|memory|settings|vehicle-events|friends|messages|diary|phone-sessions)(\/|$)/.test(path);
+  const known = /^\/v1\/(consents|pairings|memory|settings|vehicle-events|friends|messages|diary|phone-sessions|account)(\/|$)/.test(path);
   if (!known) return null;
 
   const who = authenticate(req, d);
   if (!who) {
+    const t = bearer(req.headers);
+    if (t && d.api.isReplacedToken(t)) {
+      d.reject("api.signed_in_elsewhere");
+      return err("signed_in_elsewhere", 401);
+    }
     d.reject("api.unauthorized");
     return json({ error: "unauthorized" }, 401);
   }
@@ -169,11 +179,17 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
 
   if (path === "/v1/phone-sessions" && m === "POST") {
     if (who.kind !== "phone") return json({ error: "forbidden" }, 403);
-    if (d.throttled(ip, "phses", d.publicPerMin * 3)) return json({ error: "rate_limited" }, 429);
+    if (d.throttled(ip, "phses", d.publicPerMin * 3)) return err("rate_limited", 429);
     const t = d.tickets.issue(installId, "any", "phone");
     return json({ sessionId: t.sessionId, wsTicket: t.wsTicket, expiresInSec: t.expiresInSec });
   }
 
+  if (path === "/v1/account" && m === "GET") {
+    if (who.kind !== "phone") return json({ error: "forbidden" }, 403);
+    const info = d.api.accountInfo(installId);
+    const phoneOnly = info.accountKind === "phone" ? d.social.store.phoneOnlyUsage(installId) : null;
+    return json({ accountKind: info.accountKind, linkedCar: info.accountKind === "car", displayName: d.api.displayNameOf(installId), googleName: info.googleName, pairedAt: info.pairedAt, phoneOnly });
+  }
   const socialRes = await handleSocial(req, url, path, m, installId, d);
   if (socialRes) return socialRes;
 
@@ -283,9 +299,9 @@ async function handleSocial(req: Request, url: URL, path: string, m: string, me:
   const accept = /^\/v1\/friends\/invites\/([^/]+)\/accept$/.exec(path);
   if (accept && m === "POST") {
     const code = accept[1]!.toUpperCase();
-    if (!INVITE_CODE_RE.test(code)) return json({ error: "unknown" }, 404);
+    if (!INVITE_CODE_RE.test(code)) return err("unknown", 404);
     const r = s.store.acceptInvite(code, me);
-    if (!r.ok) return json({ error: r.reason }, r.reason === "unknown" ? 404 : r.reason === "expired" ? 410 : r.reason === "self" ? 400 : 409);
+    if (!r.ok) return err(r.reason, r.reason === "unknown" ? 404 : r.reason === "expired" ? 410 : r.reason === "self" ? 400 : 409);
     return json({ friend: r.friend });
   }
   if (path === "/v1/friends" && m === "GET") return json(s.store.listFriends(me));
@@ -309,8 +325,8 @@ async function handleSocial(req: Request, url: URL, path: string, m: string, me:
     if (!to) return json({ error: "not_found" }, 404);
     const r = s.sendToAccount(me, to.account, b.text);
     if (r.ok) return json({ id: r.message.id, at: new Date(r.message.at).toISOString() }, 201);
-    if (r.reason === "blocked") return json({ error: "message_blocked", code: "message_blocked" }, 422);
-    return r.reason === "bad_text" ? json({ error: "bad_text", max: MAX_MESSAGE_CHARS }, 400) : json({ error: "not_found" }, 404);
+    if (r.reason === "blocked") return err("message_blocked", 422);
+    return r.reason === "bad_text" || r.reason === "too_long" ? json({ error: "bad_text", code: "bad_text", max: MAX_MESSAGE_CHARS }, 400) : err("not_found", 404);
   }
   if (path === "/v1/messages" && m === "GET") {
     const since = url.searchParams.get("since");

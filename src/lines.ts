@@ -25,11 +25,15 @@ export const friendArrivedLine = (name: string, s: SpeechStyle): string =>
   s === "jondaetmal" ? `${name}님이 도착했대요!` : `${ga(name)} 도착했대!`;
 
 export const sentToFriend = (name: string, s: SpeechStyle): string => (s === "jondaetmal" ? `${name}님께 전했어요.` : `${name}한테 전했어!`);
-export const friendNotFound = (name: string, s: SpeechStyle): string =>
-  s === "jondaetmal" ? `${name}님이라는 친구는 못 찾았어요.` : `${name}라는 친구는 못 찾았어.`;
-
 /** 운전이 끝났을 때 폰으로 보내는 한 줄(브랜드 톤, 장소 이름만). */
 export const tripDoneLine = (place: string | null): string => (place ? `오늘도 같이 달렸어. ${place} 도착 축하해!` : "오늘도 같이 달렸어. 수고했어!");
+
+/** 운행 끝에 차가 하는 한마디(§6.4): 기억 저장 끔 / 폰 연결 없음 / 일기 준비. */
+export const tripCarLine = (o: { memory: boolean; phoneLinked: boolean }): string =>
+  !o.memory ? "오늘도 같이 달렸어" : o.phoneLinked ? "오늘 일기 써 뒀어, 폰에서 봐!" : "폰을 연결하면 일기를 볼 수 있어";
+
+/** 아주 짧은 운행(있었던 일이 없음)의 한 줄 일기. */
+export const SHORT_DIARY = "오늘은 짧게 같이 달렸다";
 
 export const hasBatchim = (ch: string): boolean => {
   const c = ch.charCodeAt(0);
@@ -67,8 +71,12 @@ export const L = {
   longTripIce: pair("멀리 가니까 언젠가 주유해야겠네~", "멀리 가니까 언젠가 주유해야겠네요~"),
   longTripLpg: pair("멀리 가니까 언젠가 충전소 들러야겠네~", "멀리 가니까 언젠가 충전소 들러야겠네요~"),
   chargingTalk: pair("충전하는 동안 수수께끼 하나 낼까? 나 잘 내!", "충전하는 동안 수수께끼 하나 낼까요? 저 잘 내요!"),
-  messageBlocked: pair("그 말은 친구한테 전하기 좀 그래. 다른 말로 해 볼래?", "그 말은 전하기 곤란해요. 다른 말로 해 보실래요?"),
-  messageBad: pair("그건 전하기 어려워, 짧게 다시 말해 줄래?", "그건 전하기 어려워요, 짧게 다시 말씀해 주실래요?"),
+  messageBlocked: pair("그 말은 전하기 어려워", "그 말은 전하기 어려워요"),
+  messageTooLong: pair("조금 짧게 말해 줄래?", "조금 짧게 말씀해 주실래요?"),
+  messageFailed: pair("지금은 못 전했어. 다시 말해 줄래?", "지금은 못 전했어요. 다시 말씀해 주실래요?"),
+  friendUnknown: pair("그런 친구는 없어. 폰에서 친구를 먼저 추가해 줘", "그런 친구는 없어요. 폰에서 친구를 먼저 추가해 주세요"),
+  friendRemoved: pair("이제 친구가 아니라서 전할 수 없어", "이제 친구가 아니라서 전할 수 없어요"),
+  friendMore: pair("친구 말이 더 있어, 멈추면 보여 줄게", "친구 말이 더 있어요, 멈추시면 보여 드릴게요"),
   messageNoReply: pair("방금 메시지 준 친구가 없어. 이름을 말해 줘!", "방금 메시지 준 친구가 없어요. 이름을 말씀해 주세요!"),
   messageAsk: pair("중에 누구한테 보낼까?", "중에 누구께 보낼까요?"),
   onboardingGreetFallback: pair("반가워! 난 헤이리야. 오늘부터 같이 다니자!", "반가워요! 저는 헤이리예요. 오늘부터 같이 다녀요!"),

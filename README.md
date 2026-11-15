@@ -72,6 +72,7 @@
 | `HOST` | 모든 인터페이스 | 바인드 주소. 컨테이너 없이 쓸 때는 `127.0.0.1` 권장 |
 | `PASSENGER_WEB_URL` | `https://hey.lastmile.ltd` | 친구 초대 링크의 앞부분. 링크는 `${PASSENGER_WEB_URL}/f/{코드}` |
 | `GOOGLE_WEB_CLIENT_ID` | 없음 | 구글 로그인(D-55) 웹 클라이언트 ID. 비면 `POST /v1/auth/google`이 503 `google_login_unconfigured`. 서버는 `sub`만 저장한다 |
+| `COMPANION_ALLOW_NONGOOGLE_CLAIM` | 없음 | `1`일 때만 구글이 아닌 폰 토큰(`/v1/phones/register`, 토큰 없음)의 `POST /v1/pairings/{code}/claim`을 받는다. e2e 시험 서버 전용, 운영은 비워 둔다(D-57: 비구글 claim은 403 `google_login_required`) |
 
 `/healthz`는 인증 없이 열려 있고 공개 요청에는 `{"ok":true}`만 돌려준다. provider·model·오류 집계는 프록시 헤더 없는 루프백 요청에만 나온다.
 

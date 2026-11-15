@@ -16,8 +16,8 @@ import { hedged } from "./llm/hedge";
 import { recentForProactive } from "./memory-lines";
 import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap, splitSentences } from "./sentence-cap";
 import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
-import { friendNotFound, sentToFriend } from "./lines";
-import { placeName, type Social } from "./social";
+import { sentToFriend } from "./lines";
+import { placeName, type SendResult, type Social } from "./social";
 import { matchFriends, parseSendIntent } from "./voice-intents";
 import { ACK_LLM_FIRST_MS, CONSENT_FREE_STEPS, HEYRI_LINES, WHALE_LINES, ackFallback, ackInstruction, cleanOnboardingAnswer, greetingInstruction, parseOnboardingFrame, parseOnboardingName, topicsMemory, tripsMemory, type OnboardingAnswers, type OnboardingStep, type QuestionStep } from "./onboarding";
 
@@ -27,6 +27,8 @@ const TRIP_HOLD_MS = 60_000;
 const REPLY_WINDOW_MS = 10 * 60_000;
 const FRIEND_SPEAK_RETRY_MS = 500;
 const FRIEND_SPEAK_MAX_TRIES = 40;
+/** 주행 중 한 번에 읽어 주는 친구 말 수(D-57 §6.3). */
+const FRIEND_DRIVING_MAX_READ = 3;
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-haiku-4-5",
@@ -109,7 +111,14 @@ interface Conn {
   pendingSend?: { text: string; candidates: { name: string; account: string }[] };
   /** 이번 운전에서 도착 알림을 이미 보냈다. */
   arrivedSent?: boolean;
+  /** 이번 운행을 시작한 날(KST). 자정을 넘겨도 이 날의 일기에 넣는다. */
+  tripDate?: string;
   friendRetry?: TimerHandle;
+  /** 친구 말 읽기 줄(도착 순서)과 주행 중 읽은 수. 정차하면 다시 센다. */
+  friendQueue?: FriendPush[];
+  friendPumping?: boolean;
+  friendDrivingRead: number;
+  friendMoreSaid?: boolean;
   /** 온보딩 답(이 연결 메모리에만 둔다). 첫 인사에 녹인다. */
   onboarding?: OnboardingAnswers;
 }
@@ -151,6 +160,11 @@ export class TalkHub {
   pushPairing(installId: string, status: PairingStatus): void {
     const msg = JSON.stringify({ type: "pairing", status } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
+  }
+  /** 폰이 연결됐다: 차 화면이 "연결됐어요!"와 구글 계정 이름을 보여 준다(D-57). */
+  pushLinked(installId: string, googleName: string | null): void {
+    const msg = JSON.stringify({ type: "pairing", status: "claimed", state: "linked", googleName });
+    for (const ws of this.socks.get(installId) ?? []) if (ws.data.kind !== "phone") ws.send(msg);
   }
   /** 그 계정의 열린 차 소켓(인사를 마친 것)에 JSON 프레임 하나를 보낸다. 받은 소켓 수. */
   pushCar(account: string, frame: object): number {
@@ -306,7 +320,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
   const conn = (d: WsData): Conn =>
     (d.conn ??= {
-      ctx: {}, seen: false, pro: newProState(), recent: [], quietUntil: 0,
+      ctx: {}, seen: false, pro: newProState(), recent: [], quietUntil: 0, friendDrivingRead: 0,
     });
 
   /** record·external_ai 철회: 대기 중인 도착 타이머와 진행 중인 턴(먼저 말 걸기 포함)을 바로 끊고 차 앱에 알린다(AC-4.9-05). */
@@ -587,9 +601,16 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const pending = c.pendingSend;
       c.pendingSend = undefined;
       const sendTo = (to: { name: string; account: string }, body: string): Plan => {
-        const r = social.sendToAccount(d.installId, to.account, body);
+        let r: SendResult;
+        try {
+          r = social.sendToAccount(d.installId, to.account, body);
+        } catch (e) {
+          observer.error("friend.send_failed", String((e as Error).message).slice(0, 200));
+          return fixed(pick(L.messageFailed, s.speech), s.speech, text, driving);
+        }
         if (r.ok) return fixed(sentToFriend(to.name, s.speech), s.speech, text, driving);
-        return fixed(pick(r.reason === "blocked" ? L.messageBlocked : L.messageBad, s.speech), s.speech, text, driving);
+        const line = r.reason === "blocked" ? L.messageBlocked : r.reason === "too_long" ? L.messageTooLong : r.reason === "not_friend" ? L.friendRemoved : L.messageFailed;
+        return fixed(pick(line, s.speech), s.speech, text, driving);
       };
       if (pending) {
         const hit = matchFriends(text, pending.candidates);
@@ -605,7 +626,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
         }
         const hits = matchFriends(intent.name, friends);
         if (hits.length === 1) return sendTo(hits[0]!, intent.text);
-        if (hits.length === 0) return fixed(friendNotFound(intent.name, s.speech), s.speech, text, driving);
+        if (hits.length === 0) return fixed(pick(social.store.wasFriend(d.installId, intent.name) ? L.friendRemoved : L.friendUnknown, s.speech), s.speech, text, driving);
         c.pendingSend = { text: intent.text, candidates: hits };
         return fixed(`${hits.map((h) => h.name).join(", ")} ${pick(L.messageAsk, s.speech)}`, s.speech, text, driving);
       }
@@ -720,26 +741,66 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   };
 
   /**
-   * 친구 메시지·도착: JSON 프레임을 바로 보내고, 소리는 지금 말하는 중이 아닐 때 헤이리 목소리로 읽는다(같은 TTS 길, turnId = 프레임 id).
-   * 주행 중에도 바로 읽는다(팀 방향). 말하는 중이면 잠깐 뒤 다시 시도한다.
+   * 친구 메시지·도착: JSON 프레임을 바로 보내고, 소리는 도착 순서대로 하나씩 헤이리 목소리로 읽는다(같은 TTS 길, turnId = 프레임 id).
+   * 말하는 중이면 잠깐 뒤 다시 시도한다(줄은 그대로 유지). 주행 중에는 운전마다 세 개까지만 읽고, 나머지는
+   * "친구 말이 더 있어, 멈추면 보여 줄게" 한 번만 말한 뒤 정차하면 읽는다(D-57 §6.3).
    */
   function speakFriend(ws: Ws, push: FriendPush): void {
+    const c = conn(ws.data);
     ws.send(JSON.stringify(push.frame));
-    const speakWhenFree = (tries: number) => {
-      const d = ws.data;
-      if (d.closed || !store.talkAllowed(d.installId)) return;
-      if (d.turn) {
-        if (tries < FRIEND_SPEAK_MAX_TRIES) clock.setTimeout(() => speakWhenFree(tries + 1), FRIEND_SPEAK_RETRY_MS);
+    (c.friendQueue ??= []).push(push);
+    pumpFriends(ws, 0);
+  }
+
+  function pumpFriends(ws: Ws, tries: number): void {
+    const d = ws.data;
+    const c = conn(d);
+    if (c.friendPumping && tries === 0) return;
+    c.friendPumping = true;
+    const queue = c.friendQueue ?? [];
+    if (d.closed || !store.talkAllowed(d.installId)) {
+      c.friendQueue = [];
+      c.friendPumping = false;
+      return;
+    }
+    const next = queue[0];
+    if (!next) {
+      c.friendPumping = false;
+      return;
+    }
+    if (d.turn) {
+      if (tries < FRIEND_SPEAK_MAX_TRIES) clock.setTimeout(() => pumpFriends(ws, tries + 1), FRIEND_SPEAK_RETRY_MS);
+      else {
+        c.friendPumping = false;
+      }
+      return;
+    }
+    const s = store.getSettings(d.installId);
+    const driving = !isParked(c.ctx);
+    let line: string;
+    let turnId = next.frame.id;
+    if (driving && next.frame.type === "friend_message" && c.friendDrivingRead >= FRIEND_DRIVING_MAX_READ) {
+      // 세 개를 넘으면 내용은 읽지 않고 줄에 남겨 둔다(정차하면 이어서 읽는다). 안내는 운전마다 한 번.
+      if (c.friendMoreSaid) {
+        c.friendPumping = false;
         return;
       }
-      const c = conn(d);
-      const s = store.getSettings(d.installId);
-      const t: Turn = { id: push.frame.id, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
-      d.turn = t;
-      observer.event("talk.friend", { kind: push.frame.type });
-      void deliver(ws, t, { text: push.line(s.speech), driving: !isParked(c.ctx), speech: s.speech, userText: "", trusted: true });
-    };
-    speakWhenFree(0);
+      c.friendMoreSaid = true;
+      line = pick(L.friendMore, s.speech);
+      turnId = crypto.randomUUID();
+      ws.send(JSON.stringify({ type: "friend_more", id: turnId, text: line }));
+    } else {
+      queue.shift();
+      line = next.line(s.speech);
+      if (driving && next.frame.type === "friend_message") c.friendDrivingRead++;
+    }
+    const t: Turn = { id: turnId, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
+    d.turn = t;
+    observer.event("talk.friend", { kind: next.frame.type });
+    void deliver(ws, t, { text: line, driving, speech: s.speech, userText: "", trusted: true }).finally(() => {
+      c.friendPumping = false;
+      if (c.friendQueue?.length) pumpFriends(ws, 0);
+    });
   }
 
   hub.onFriend = speakFriend;
@@ -843,24 +904,28 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (!social || baseline || !store.talkAllowed(d.installId)) return;
     const c = conn(d);
     const now = clock.now();
-    const date = kstDay(now);
+    // 자정을 넘긴 운행은 시작한 날의 일기에 넣는다(D-57 §6.4).
+    const date = c.tripActive && c.tripDate ? c.tripDate : kstDay(now);
     const moving = cur.gear === "D" || cur.gear === "R" || (typeof cur.speedKmh === "number" && cur.speedKmh > 0);
     const place = placeName(cur.destinationName);
     if (place) {
       c.tripPlace = place;
       social.place(d.installId, date, place);
     }
-    if (wiperOn(cur.wiper) && !wiperOn(prev.wiper)) social.note(d.installId, "rain");
-    if (cur.headlight === true && prev.headlight !== true && isNight(now)) social.note(d.installId, "night");
-    if (cur.charging === true && prev.charging !== true) social.charged(d.installId);
+    if (wiperOn(cur.wiper) && !wiperOn(prev.wiper)) social.note(d.installId, "rain", date);
+    if (cur.headlight === true && prev.headlight !== true && isNight(now)) social.note(d.installId, "night", date);
+    if (cur.charging === true && prev.charging !== true) social.charged(d.installId, date);
     if (moving) {
       if (c.tripHold) clock.clearTimeout(c.tripHold);
       c.tripHold = undefined;
       if (!c.tripActive) {
         c.tripActive = true;
+        c.tripDate = date;
         c.arrivedSent = false;
         c.tripPlace = place;
-        social.tripStarted(d.installId);
+        c.friendDrivingRead = 0;
+        c.friendMoreSaid = false;
+        social.tripStarted(d.installId, date);
       }
       return;
     }
@@ -892,7 +957,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const place = c.tripPlace ?? null;
     if (!c.arrivedSent) opts.social.arrived(ws.data.installId);
     c.arrivedSent = true;
-    opts.social.tripDone(ws.data.installId, place);
+    opts.social.tripDone(ws.data.installId, place, c.tripDate ?? kstDay(clock.now()));
   }
 
   const clearFirstStopRetry = (c: Conn) => {
@@ -990,6 +1055,8 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const baseline = !c.seen && Object.keys(prev).length === 0;
     c.seen = true;
     trackTrip(ws, prev, cur, baseline);
+    // 막혀 있던 친구 말은 정차하면 도착 순서대로 읽는다.
+    if (isParked(cur) && c.friendQueue?.length) pumpFriends(ws, 0);
 
     const moving = cur.gear === "D" || cur.gear === "R" || (typeof cur.speedKmh === "number" && cur.speedKmh > 0);
     if (moving) {
