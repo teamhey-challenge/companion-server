@@ -312,149 +312,40 @@ describe("proactive decision", () => {
     car.close();
   });
 
-  test("low range at P speaks with the fuel type: EV says 충전, gasoline says 주유", async () => {
-    for (const [fuel, word] of [[10, "충전"], [1, "주유"]] as const) {
+  test("D-47 rule 11: a low range alone says nothing (no fuel/range nagging)", async () => {
+    const car = await readyCar(newLlm());
+    car.ctx({ gear: "N", speedKmh: 0 });
+    car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: 10 });
+    car.ctx({ gear: "P", speedKmh: 0, rangeKm: 5, fuelType: 10 });
+    await Bun.sleep(200);
+    expect(proactives(car)).toEqual([]);
+    car.close();
+  });
+
+  test("long destination: one light line per fuel type, no numbers", async () => {
+    for (const [fuel, word] of [[10, "충전해야겠네~"], [1, "주유해야겠네~"], [7, "충전소 들러야겠네~"]] as const) {
       const car = await readyCar(newLlm());
       car.ctx({ gear: "N", speedKmh: 0 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: fuel });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 30, fuelType: fuel });
+      car.ctx({ gear: "P", speedKmh: 0, fuelType: fuel, destKm: 20 });
+      car.ctx({ gear: "P", speedKmh: 0, fuelType: fuel, destKm: 180 });
       await car.until((f) => f.some((x) => x.type === "reply.end"));
-      expect(car.frames.find((f) => f.type === "reply.end")?.text).toContain(word);
+      const text = car.frames.find((f) => f.type === "reply.end")?.text ?? "";
+      expect(text).toBe(`멀리 가니까 언젠가 ${word}`);
+      expect(text).not.toMatch(/\d/);
+      expect(proactives(car).map((p) => p.reason)).toEqual(["longTrip"]);
       car.close();
     }
   });
 
-  describe("scenario 2 (PLEOS-168): range vs the navigation destination, and 'later'", () => {
-    const lowEv = (car: Car, extra: Record<string, unknown> = {}) => {
-      car.ctx({ gear: "N", speedKmh: 0 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: 10, ...extra });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 30, fuelType: 10, ...extra });
-    };
-    const lastText = (car: Car) => [...car.frames].reverse().find((f) => f.type === "reply.end")?.text ?? "";
-
-    test("with a destination: compares the distances and asks per fuel type", async () => {
-      for (const [fuel, word] of [[10, "충전 들를래?"], [1, "주유 들를래?"], [7, "충전소 들를래?"]] as const) {
-        const car = await readyCar(newLlm());
-        car.ctx({ gear: "N", speedKmh: 0 });
-        car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: fuel, destKm: 42 });
-        car.ctx({ gear: "P", speedKmh: 0, rangeKm: 30, fuelType: fuel, destKm: 42 });
-        await car.until((f) => f.some((x) => x.type === "reply.end"));
-        expect(lastText(car)).toBe(`목적지까지 42km인데 남은 거리가 30km야. 가는 길에 ${word}`);
-        car.close();
-      }
-    });
-
-    test("with a destination: 60 km of range is short for a 90 km trip, 200 km is fine for 42 km", async () => {
-      const car = await readyCar(newLlm());
-      car.ctx({ gear: "N", speedKmh: 0 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: 10, destKm: 90 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 60, fuelType: 10, destKm: 90 });
-      await car.until((f) => f.some((x) => x.type === "reply.end"));
-      expect(lastText(car)).toContain("목적지까지 90km인데 남은 거리가 60km");
-      car.close();
-      const ok = await Car.connect(boot(newLlm()), "install-0003");
-      await ok.grantTalk();
-      await ok.consent("memory");
-      ok.ctx({ gear: "N", speedKmh: 0 });
-      ok.ctx({ gear: "P", speedKmh: 0, rangeKm: 400, fuelType: 10, destKm: 42 });
-      ok.ctx({ gear: "P", speedKmh: 0, rangeKm: 200, fuelType: 10, destKm: 42 });
-      await Bun.sleep(200);
-      expect(proactives(ok)).toEqual([]);
-      ok.close();
-    });
-
-    test("without a destination: the non-assuming line, nothing about a destination", async () => {
-      const car = await readyCar(newLlm());
-      lowEv(car);
-      await car.until((f) => f.some((x) => x.type === "reply.end"));
-      expect(lastText(car)).toBe("남은 거리가 좀 빠듯해. 출발 전에 충전 들를래?");
-      car.close();
-    });
-
-    /** A car whose clock can be moved: the 6 s quiet time after a spoken reply must pass before the next stop. */
-    const shiftedCar = async (installId: string) => {
-      const real = new SystemClock();
-      const shift = { ms: 0 };
-      const clock: Clock = { now: () => real.now() + shift.ms, setTimeout: (f, ms) => real.setTimeout(f, ms), clearTimeout: (h) => real.clearTimeout(h) };
-      const car = await Car.connect(boot(newLlm(), false, clock), installId);
-      await car.grantTalk();
-      await car.consent("memory");
-      return { car, shift };
-    };
-
-    test("'later' is remembered: the next parked stop reminds once, then it is cleared", async () => {
-      const { car, shift } = await shiftedCar("install-0010");
-      lowEv(car, { destKm: 42 });
-      await car.until((f) => f.some((x) => x.type === "reply.end"));
-      expect(await car.say("이따가 할래", "l1", { gear: "P", speedKmh: 0, rangeKm: 30, fuelType: 10, destKm: 42 })).toContain("한 번 더 챙겨 줄게");
-      shift.ms += 20_000;
-      car.ctx({ gear: "D", speedKmh: 40, rangeKm: 30, fuelType: 10 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 28, fuelType: 10 });
-      await car.until((f) => f.filter((x) => x.type === "proactive").length === 2);
-      expect(proactives(car).map((p) => p.reason)).toEqual(["range", "reminder"]);
-      await car.until((f) => f.filter((x) => x.type === "reply.end").length === 3);
-      expect(lastText(car)).toBe("아까 충전 들르기로 한 거 기억해?");
-      // a third stop: the reminder is gone, the ordinary arrival line comes back and nothing repeats the reminder
-      shift.ms += 20_000;
-      car.ctx({ gear: "D", speedKmh: 40, rangeKm: 28, fuelType: 10 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 26, fuelType: 10 });
-      await Bun.sleep(300);
-      expect(proactives(car).map((p) => p.reason).filter((r) => r === "reminder")).toHaveLength(1);
-      car.close();
-    });
-
-    test("not 'later' (a plain answer, or a refusal) sets no reminder", async () => {
-      for (const answer of ["응 들를게", "아니 안 들를래"]) {
-        const car = await readyCar(newLlm());
-        lowEv(car);
-        await car.until((f) => f.some((x) => x.type === "reply.end"));
-        await car.say(answer, "n1", { gear: "P", speedKmh: 0, rangeKm: 30, fuelType: 10 });
-        car.ctx({ gear: "D", speedKmh: 40, rangeKm: 30, fuelType: 10 });
-        car.ctx({ gear: "P", speedKmh: 0, rangeKm: 28, fuelType: 10 });
-        await Bun.sleep(300);
-        expect(proactives(car).map((p) => p.reason)).not.toContain("reminder");
-        car.close();
-      }
-    });
-
-    test("'later' said to anything else than the stop question is not a reminder", async () => {
-      const car = await readyCar(newLlm());
-      await car.say("나중에 얘기하자", "x1", { gear: "P", speedKmh: 0 });
-      car.ctx({ gear: "D", speedKmh: 40 });
-      car.ctx({ gear: "P", speedKmh: 0 });
-      await Bun.sleep(300);
-      expect(proactives(car).map((p) => p.reason)).not.toContain("reminder");
-      car.close();
-    });
-
-    test("D-14: while navigation guides nothing is said; the reminder waits for a stop without guidance", async () => {
-      const { car, shift } = await shiftedCar("install-0011");
-      lowEv(car, { destKm: 42 });
-      await car.until((f) => f.some((x) => x.type === "reply.end"));
-      await car.say("나중에 할게", "d1", { gear: "P", speedKmh: 0, rangeKm: 30, fuelType: 10, destKm: 42 });
-      shift.ms += 20_000;
-      car.ctx({ gear: "D", speedKmh: 40, rangeKm: 30, fuelType: 10, naviGuiding: true });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 28, fuelType: 10, naviGuiding: true });
-      await Bun.sleep(300);
-      expect(proactives(car).map((p) => p.reason)).toEqual(["range"]);
-      car.ctx({ gear: "D", speedKmh: 40, rangeKm: 28, fuelType: 10, naviGuiding: false });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 26, fuelType: 10, naviGuiding: false });
-      await car.until((f) => f.filter((x) => x.type === "proactive").length === 2);
-      expect(proactives(car).map((p) => p.reason)).toEqual(["range", "reminder"]);
-      car.close();
-    });
-
-    test("if the range is plentiful again at the next stop (charged), the reminder is dropped silently", async () => {
-      const car = await readyCar(newLlm());
-      lowEv(car);
-      await car.until((f) => f.some((x) => x.type === "reply.end"));
-      await car.say("이따가 할래", "r1", { gear: "P", speedKmh: 0, rangeKm: 30, fuelType: 10 });
-      car.ctx({ gear: "D", speedKmh: 40, rangeKm: 30, fuelType: 10 });
-      car.ctx({ gear: "P", speedKmh: 0, rangeKm: 320, fuelType: 10 });
-      await Bun.sleep(300);
-      expect(proactives(car).map((p) => p.reason)).not.toContain("reminder");
-      car.close();
-    });
+  test("charging event: small talk once when the charge starts", async () => {
+    const car = await readyCar(newLlm());
+    car.ctx({ gear: "N", speedKmh: 0 });
+    car.ctx({ gear: "P", speedKmh: 0, charging: false });
+    car.ctx({ gear: "P", speedKmh: 0, charging: true });
+    await car.until((f) => f.some((x) => x.type === "reply.end"));
+    expect(proactives(car).map((p) => p.reason)).toEqual(["charging"]);
+    expect(car.frames.find((f) => f.type === "reply.end")?.text).toContain("수수께끼");
+    car.close();
   });
 
   test("arrival: P for 3 s after driving speaks once; going back to D first cancels it", async () => {

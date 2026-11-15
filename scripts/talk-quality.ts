@@ -36,7 +36,7 @@ const base = `http://127.0.0.1:${server.port}`;
 const side = new Database(dbPath);
 
 async function judge(sc: TalkScenario, turn: TalkTurn, reply: string, history: string): Promise<{ ok: boolean; why: string }> {
-  const user = `${history}[운전자 말] ${turn.text}\n[상태] ${turn.driving ? "주행 중" : "정차 중"}\n[헤이파리 답] ${reply}`;
+  const user = `${history}[운전자 말] ${turn.text}\n[상태] ${turn.driving ? "주행 중" : "정차 중"}\n[헤이리 답] ${reply}`;
   let out = "";
   for await (const d of streamLlm(getProvider(talk.providerName), { model: talk.model, system: buildTalkJudgeSystem(sc, turn), userText: user, maxTokens: 300, baseUrl: talk.baseUrl }, talk.apiKey!)) out += d;
   const m = out.match(/\{[\s\S]*\}/);

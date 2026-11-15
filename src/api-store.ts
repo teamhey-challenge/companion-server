@@ -16,10 +16,9 @@ import {
 } from "../shared/packages/protocol/src/index";
 import type { Clock } from "./clock";
 
-/** meetStage 0 처음 ~ 4 끝. lastGreetingDay는 차 시계 기준 날짜 문자열. pendingStop: "이따가 할래"로 미룬 들를 곳(유종 갈래), 다음 정차 때 한 번 챙기고 비운다. */
-export type StopKind = "ev" | "lpg" | "ice";
-export interface TalkState { meetStage: number; lastGreetingDay: string | null; pendingStop: StopKind | null }
-export const DEFAULT_TALK_STATE: TalkState = { meetStage: 0, lastGreetingDay: null, pendingStop: null };
+/** meetStage 0 처음 ~ 4 끝. lastGreetingDay는 차 시계 기준 날짜 문자열. */
+export interface TalkState { meetStage: number; lastGreetingDay: string | null }
+export const DEFAULT_TALK_STATE: TalkState = { meetStage: 0, lastGreetingDay: null };
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 type MemRow = { seq: number; id: string; kind: MemoryKind; text: string; created_at: number };
@@ -28,7 +27,7 @@ type MemRow = { seq: number; id: string; kind: MemoryKind; text: string; created
 export function normalizeMemoryText(text: string): string {
   return text.replace(/\s+/g, " ").trim().replace(/[\s.!?。…~,]+$/u, "");
 }
-export const CHARACTER_NAME = "헤이파리";
+export const CHARACTER_NAME = "헤이리";
 const MAX_EVENTS_PER_CAR = 200;
 
 /** 꾸미기(D-41). Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니(기본: 지금 보이는 모습)·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
