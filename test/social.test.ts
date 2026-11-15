@@ -246,7 +246,7 @@ describe("push", () => {
     await carSock.until(() => carSock.of("reply.end").length === 1);
     expect(carSock.of("friend_message")[0]).toEqual({ type: "friend_message", id: sent.id, fromName: "민수", text: "오늘 저녁 같이 먹자" });
     expect(carSock.of("reply.start")[0]).toMatchObject({ turnId: sent.id, audio: { format: "pcm_s16le", sampleRate: 24000, channels: 1 } });
-    expect(carSock.of("reply.end")[0]).toMatchObject({ turnId: sent.id, text: "민수가 그러는데, 오늘 저녁 같이 먹자" });
+    expect(carSock.of("reply.end")[0]).toMatchObject({ turnId: sent.id, text: "민수가 그러는데, 오늘 저녁 같이 먹재" });
     expect(carSock.bins).toBeGreaterThan(0);
     await aInbox.until(() => aInbox.of("friend_message").length === 1);
     expect(aInbox.of("friend_message")[0]).toMatchObject({ id: sent.id, fromName: "민수" });
