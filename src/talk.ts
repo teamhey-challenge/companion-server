@@ -643,7 +643,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       }
       if (st.meetStage === 2) {
         const nick = answerNickname(text);
-        const next = setSettings(d.installId, { nickname: nick ?? null, ...(nick && !s.displayName ? { displayName: nick } : {}) });
+        const next = setSettings(d.installId, { nickname: nick ?? null });
         store.patchTalkState(d.installId, { meetStage: 3 });
         return fixed(withName(pick(L.askChat, next.speech), next.nickname, next.speech), next.speech, text, driving);
       }
@@ -675,7 +675,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     }
     const nickReq = parseNicknameRequest(text);
     if (nickReq) {
-      const next = setSettings(d.installId, { nickname: nickReq, ...(s.displayName ? {} : { displayName: nickReq }) });
+      const next = setSettings(d.installId, { nickname: nickReq });
       return fixed(nicknameSet(nickReq, next.speech), next.speech, text, driving);
     }
 
@@ -886,7 +886,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const name = parseOnboardingName(text);
       if (name === undefined) return skip();
       a.name = name;
-      if (name) setSettings(d.installId, { nickname: name, displayName: name });
+      if (name) setSettings(d.installId, { nickname: name });
       return accepted(name ?? text, name);
     }
     const clean = cleanOnboardingAnswer(text);
