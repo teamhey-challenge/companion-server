@@ -28,7 +28,7 @@ function boot(publicPerMin = 100) {
   const pairingPushed: [string, string][] = [];
   const dbPath = `${mkdtempSync(`${tmpdir()}/api-`)}/c.db`;
   const s = createServer({
-    allowNonGoogleClaim: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath, clock, publicPerMin,
+    allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath, clock, publicPerMin,
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 1000 },
     hub: { pushSettings: (id, st) => pushed.push([id, st]), pushPairing: (id, st) => pairingPushed.push([id, st]) },
   });

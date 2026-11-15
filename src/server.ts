@@ -48,6 +48,8 @@ export interface ServerOptions {
   googleFetch?: typeof fetch;
   /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결도 받는다. 운영은 끈다(D-57). */
   allowNonGoogleClaim?: boolean;
+  /** 시험 전용(COMPANION_ALLOW_PHONE_ONLY=1): 폰 전용 계정을 허용한다. 운영은 끈다(D-58). */
+  allowPhoneOnly?: boolean;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -150,6 +152,7 @@ export function createServer(o: ServerOptions): RunningServer {
         },
         pushLinked: (id, name) => talkHub.pushLinked(id, name),
         allowNonGoogleClaim: o.allowNonGoogleClaim ?? false,
+        allowPhoneOnly: o.allowPhoneOnly ?? false,
         consentChanged: (id, withdrawn) => talkHub.consentChanged(id, withdrawn),
         throttled,
         publicPerMin: o.publicPerMin ?? 20,
