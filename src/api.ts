@@ -320,6 +320,7 @@ async function handleSocial(req: Request, url: URL, path: string, m: string, me:
     const inv = s.store.createInvite(me);
     return json({ code: inv.code, url: `${d.passengerWebUrl}/f/${inv.code}`, expiresAt: inv.expiresAt });
   }
+  // 대체됨: 친구 요청(POST /v1/friends/requests → 수락)이 새 흐름이다. 차가 이미 병합해 쓰므로 당분간 즉시 친구 맺기를 남겨 둔다.
   const accept = /^\/v1\/friends\/invites\/([^/]+)\/accept$/.exec(path);
   if (accept && m === "POST") {
     const code = accept[1]!.toUpperCase();
@@ -328,6 +329,43 @@ async function handleSocial(req: Request, url: URL, path: string, m: string, me:
     const r = s.store.acceptInvite(code, me);
     if (!r.ok) return err(r.reason, r.reason === "unknown" ? 404 : r.reason === "expired" ? 410 : r.reason === "self" ? 400 : 409);
     return json({ friend: r.friend });
+  }
+
+  if (path === "/v1/friends/requests") {
+    if (m === "POST") {
+      if (d.throttled(me, "freq", d.publicPerMin)) return err("rate_limited", 429);
+      const b = await readJson(req);
+      if (!isObj(b) || typeof b.code !== "string") return bad();
+      const code = b.code.replace(/\s+/g, "").toUpperCase();
+      if (!INVITE_CODE_RE.test(code)) return err("unknown_code", 404);
+      if (!d.allowPhoneOnly && s.store.inviteOwner(code)?.startsWith("ph_")) return err("unknown_code", 404);
+      const r = s.store.sendRequest(code, me);
+      if (!r.ok) return err(r.reason, r.reason === "unknown_code" ? 404 : r.reason === "expired_code" ? 410 : 409);
+      if (!r.existing) s.notifyFriend(r.to, { type: "friend_request", id: r.id, fromName: d.api.displayNameOf(me) });
+      return json({ id: r.id, to: { name: d.api.displayNameOf(r.to) }, createdAt: r.createdAt }, r.existing ? 200 : 201);
+    }
+    if (m === "GET") {
+      const l = s.store.listRequests(me);
+      return json({
+        incoming: l.incoming.map((r) => ({ id: r.id, from: { id: r.fromAccount, name: d.api.displayNameOf(r.fromAccount) }, createdAt: r.createdAt })),
+        outgoing: l.outgoing.map((r) => ({ id: r.id, to: { name: d.api.displayNameOf(r.toAccount) }, createdAt: r.createdAt })),
+      });
+    }
+    return null;
+  }
+  const reqAct = /^\/v1\/friends\/requests\/([^/]+)(?:\/(accept|decline))?$/.exec(path);
+  if (reqAct) {
+    const id = decodeURIComponent(reqAct[1]!);
+    const act = reqAct[2];
+    if (act === "accept" && m === "POST") {
+      const r = s.store.acceptRequest(id, me);
+      if (!r.ok) return err(r.reason, r.reason === "not_found" ? 404 : 409);
+      s.notifyFriend(r.fromAccount, { type: "friend_accepted", id, name: d.api.displayNameOf(me) });
+      return json({ friend: r.friend });
+    }
+    if (act === "decline" && m === "POST") return s.store.removeRequest(id, me, "to") ? noContent() : err("not_found", 404);
+    if (!act && m === "DELETE") return s.store.removeRequest(id, me, "from") ? noContent() : err("not_found", 404);
+    return null;
   }
   if (path === "/v1/friends" && m === "GET") return json(s.store.listFriends(me));
   const friend = /^\/v1\/friends\/([^/]+)$/.exec(path);
