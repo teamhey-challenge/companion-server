@@ -22,7 +22,7 @@ export interface DiaryEntry { at: string; text: string; kind: DiaryKind }
 
 export type AcceptResult =
   | { ok: true; friend: Friend }
-  | { ok: false; reason: "unknown" | "expired" | "self" | "limit" };
+  | { ok: false; reason: "unknown" | "expired" | "self" | "limit" | "already_friends" };
 
 /** 친구·초대·메시지·신고·일기 저장소(같은 sqlite 파일). 계정 id = 차 installId 또는 폰 전용 계정 id. */
 export class SocialStore {
@@ -44,6 +44,16 @@ export class SocialStore {
       seq INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, date TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL)`);
     db.run("CREATE INDEX IF NOT EXISTS diary_entries_day ON diary_entries (account, date, at)");
     db.run("CREATE TABLE IF NOT EXISTS diary_summaries (account TEXT NOT NULL, date TEXT NOT NULL, summary TEXT NOT NULL, PRIMARY KEY (account, date))");
+    // 일기 쓰기가 실패한 날(서버 오류). 다음 운행 끝에 다시 쓴다.
+    db.run("CREATE TABLE IF NOT EXISTS diary_pending (account TEXT NOT NULL, date TEXT NOT NULL, PRIMARY KEY (account, date))");
+  }
+
+  /** 지금은 친구가 아니지만 예전에 메시지를 주고받은 사람 중 이름이 맞는 사람이 있나("이제 친구가 아니라서 전할 수 없어"). */
+  wasFriend(owner: string, spokenName: string): boolean {
+    const n = spokenName.trim().replace(/[야아]$/u, "");
+    if (!n) return false;
+    const rows = this.db.query("SELECT DISTINCT CASE WHEN from_id = ?1 THEN to_id ELSE from_id END AS other FROM messages WHERE from_id = ?1 OR to_id = ?1").all(owner) as { other: string }[];
+    return rows.some((r) => this.rowFor(owner, r.other) === null && (this.nameOf(r.other) === spokenName.trim() || this.nameOf(r.other) === n));
   }
 
   // ---- 초대 ----
@@ -72,16 +82,25 @@ export class SocialStore {
     const now = this.clock.now();
     const mk = (owner: string, friend: string) =>
       this.db.query("INSERT INTO friends (id, owner, friend, since) VALUES (?1, ?2, ?3, ?4)").run(crypto.randomUUID(), owner, friend, now);
-    const created = this.db.transaction((): boolean => {
-      if (this.rowFor(who, inv.owner)) return true;
-      if (this.count(who) >= MAX_FRIENDS || this.count(inv.owner) >= MAX_FRIENDS) return false;
+    const created = this.db.transaction((): "already" | "limit" | "created" => {
+      if (this.rowFor(who, inv.owner)) return "already";
+      if (this.count(who) >= MAX_FRIENDS || this.count(inv.owner) >= MAX_FRIENDS) return "limit";
       mk(who, inv.owner);
       mk(inv.owner, who);
-      return true;
+      return "created";
     }).immediate();
-    if (!created) return { ok: false, reason: "limit" };
+    if (created === "limit") return { ok: false, reason: "limit" };
+    if (created === "already") return { ok: false, reason: "already_friends" };
     return { ok: true, friend: this.view(this.rowFor(who, inv.owner)!) };
   }
+  /** 폰 전용 계정에 친구·대화가 있나(차를 묶으면 옮겨지지 않는다는 확인 시트용). */
+  phoneOnlyUsage(account: string): { friends: number; messages: number; hasData: boolean } {
+    const friends = this.count(account);
+    const m = this.db.query("SELECT COUNT(*) AS n FROM messages WHERE from_id = ?1 OR to_id = ?1").get(account);
+    const messages = m !== null && typeof m === "object" && "n" in m && typeof m.n === "number" ? m.n : 0;
+    return { friends, messages, hasData: friends > 0 || messages > 0 };
+  }
+
 
   private count(owner: string): number {
     const r = this.db.query("SELECT COUNT(*) AS n FROM friends WHERE owner = ?1").get(owner);
@@ -212,9 +231,22 @@ export class SocialStore {
   }
 
   // ---- 일기 ----
-  addDiaryEntry(account: string, kind: DiaryKind, text: string): void {
+  addDiaryEntry(account: string, kind: DiaryKind, text: string, date?: string): void {
     const at = this.clock.now();
-    this.db.query("INSERT INTO diary_entries (account, date, at, kind, text) VALUES (?1, ?2, ?3, ?4, ?5)").run(account, kstDate(at), at, kind, text);
+    this.db.query("INSERT INTO diary_entries (account, date, at, kind, text) VALUES (?1, ?2, ?3, ?4, ?5)").run(account, date ?? kstDate(at), at, kind, text);
+  }
+
+  /** 일기 쓰기가 실패한 날을 적어 둔다(다음 운행 끝에 다시 쓴다). */
+  markDiaryPending(account: string, date: string): void {
+    this.db.query("INSERT OR IGNORE INTO diary_pending (account, date) VALUES (?1, ?2)").run(account, date);
+  }
+
+  clearDiaryPending(account: string, date: string): void {
+    this.db.query("DELETE FROM diary_pending WHERE account = ?1 AND date = ?2").run(account, date);
+  }
+
+  pendingDiaryDates(account: string): string[] {
+    return (this.db.query("SELECT date FROM diary_pending WHERE account = ?1 ORDER BY date").all(account) as { date: string }[]).map((r) => r.date);
   }
 
   diaryEntries(account: string, date: string): DiaryEntry[] {
@@ -237,6 +269,7 @@ export class SocialStore {
     this.db.transaction(() => {
       this.db.query("DELETE FROM diary_entries WHERE account = ?1").run(account);
       this.db.query("DELETE FROM diary_summaries WHERE account = ?1").run(account);
+      this.db.query("DELETE FROM diary_pending WHERE account = ?1").run(account);
       this.db.query("DELETE FROM diary_flags WHERE account = ?1").run(account);
       this.db.query("DELETE FROM diary_places WHERE account = ?1").run(account);
       this.db.query("DELETE FROM message_reports WHERE message_id IN (SELECT id FROM messages WHERE from_id = ?1 OR to_id = ?1)").run(account);

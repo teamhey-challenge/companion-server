@@ -49,8 +49,10 @@ export function characterFor(installId: string | null): CharacterInfo {
 }
 
 export type ClaimResult =
-  | { ok: true; phoneToken: string; character: CharacterInfo }
-  | { ok: false; reason: "unknown" | "claimed" | "expired" | "car_linked_to_other_account" | "google_linked_to_other_car" };
+  | { ok: true; phoneToken: string; character: CharacterInfo; installId: string; googleName: string | null }
+  | { ok: false; reason: "unknown" | "already_used" | "expired" | "car_linked_to_other_account" | "google_linked_to_other_car" };
+
+export type CurrentPairing = CurrentPairingResponse & { googleName?: string | null };
 
 /**
  * 동의·페어링·기억·설정·차량 이벤트 저장소(같은 sqlite 파일). 동기 API(bun:sqlite).
@@ -85,6 +87,10 @@ export class ApiStore {
     // 구글 로그인(D-55). sub 만 보관한다(이메일·사진 없음). 폰 전용 계정과 차 계정에 각각 최대 하나.
     db.run("CREATE TABLE IF NOT EXISTS google_phone (sub TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE)");
     db.run("CREATE TABLE IF NOT EXISTS google_car (install_id TEXT PRIMARY KEY, sub TEXT NOT NULL UNIQUE)");
+    // 구글 given_name(표시용 이름)만. 이메일·사진은 받지 않는다.
+    db.run("CREATE TABLE IF NOT EXISTS google_names (sub TEXT PRIMARY KEY, given_name TEXT NOT NULL)");
+    // 새 로그인·재연결로 밀려난 폰 토큰(해시). 이 토큰의 요청은 401 signed_in_elsewhere 로 알려 준다.
+    db.run("CREATE TABLE IF NOT EXISTS replaced_tokens (token_hash TEXT PRIMARY KEY, at INTEGER NOT NULL)");
   }
 
   /** 여러 저장 동작을 한 트랜잭션으로 묶는다(중첩 가능). */
@@ -151,11 +157,28 @@ export class ApiStore {
     throw new Error("pair code generation failed");
   }
 
+  private replaceToken(oldHash: string | null | undefined): void {
+    if (!oldHash) return;
+    const now = this.clock.now();
+    this.db.query("INSERT OR REPLACE INTO replaced_tokens (token_hash, at) VALUES (?1, ?2)").run(oldHash, now);
+    this.db.query("DELETE FROM replaced_tokens WHERE at < ?1").run(now - 30 * 24 * 3600_000);
+  }
+
+  /** 다른 폰의 로그인·재연결로 밀려난 토큰인가. */
+  isReplacedToken(token: string): boolean {
+    return this.db.query("SELECT 1 AS x FROM replaced_tokens WHERE token_hash = ?1").get(sha256(token)) !== null;
+  }
+
   private prunePairings(now: number): void {
     this.db.query("DELETE FROM pairings WHERE claimed_at IS NULL AND expires_at < ?1").run(now - 24 * 3600_000);
   }
 
-  currentPairing(installId: string): CurrentPairingResponse {
+  private googleNameOfCar(installId: string): string | null {
+    const r = this.db.query("SELECT n.given_name AS name FROM google_car c JOIN google_names n ON n.sub = c.sub WHERE c.install_id = ?1").get(installId) as { name: string } | null;
+    return r?.name ?? null;
+  }
+
+  currentPairing(installId: string): CurrentPairing {
     const now = this.clock.now();
     const claimed = this.db.query("SELECT claimed_at FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL ORDER BY claimed_at DESC LIMIT 1").get(installId) as { claimed_at: number } | null;
     const latest = this.db.query("SELECT code, expires_at, claimed_at FROM pairings WHERE install_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1").get(installId) as
@@ -163,7 +186,7 @@ export class ApiStore {
     if (latest && latest.claimed_at === null && latest.expires_at > now) {
       return { status: "pending", pairCode: latest.code, expiresAt: iso(latest.expires_at) };
     }
-    if (claimed) return { status: "claimed", pairedAt: iso(claimed.claimed_at) };
+    if (claimed) return { status: "claimed", pairedAt: iso(claimed.claimed_at), googleName: this.googleNameOfCar(installId) };
     if (latest) return { status: "expired", pairCode: latest.code, expiresAt: iso(latest.expires_at) };
     return { status: "none" };
   }
@@ -176,10 +199,10 @@ export class ApiStore {
     return { status: r.expires_at > this.clock.now() ? "pending" : "expired", installId: r.install_id };
   }
 
-  /** 한 차에 폰 하나: 이전에 연결된 폰 토큰은 무효가 된다. googleSub 가 있으면(구글 로그인 폰) 그 차에 묶고, 없으면 옛 묶음을 지운다. */
+  /** 한 차에 폰 하나: 이전에 연결된 폰 토큰은 무효가 된다(그 폰은 signed_in_elsewhere). googleSub 가 있으면(구글 로그인 폰) 그 차에 묶고, 없으면 옛 묶음을 지운다. */
   claimPairing(code: string, record: boolean, memory: boolean, googleSub: string | null = null): ClaimResult {
     const p = this.publicPairing(code);
-    if (p.status !== "pending" || !p.installId) return { ok: false, reason: p.status === "pending" ? "unknown" : p.status };
+    if (p.status !== "pending" || !p.installId) return { ok: false, reason: p.status === "pending" ? "unknown" : p.status === "claimed" ? "already_used" : p.status };
     const installId = p.installId;
     if (googleSub !== null) {
       const bound = this.db.query("SELECT sub FROM google_car WHERE install_id = ?1").get(installId) as { sub: string } | null;
@@ -190,6 +213,7 @@ export class ApiStore {
     const now = this.clock.now();
     const phoneToken = randomBytes(32).toString("base64url");
     this.db.transaction(() => {
+      for (const o of this.db.query("SELECT phone_hash FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL").all(installId) as { phone_hash: string | null }[]) this.replaceToken(o.phone_hash);
       this.db.query("DELETE FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL").run(installId);
       this.db.query("UPDATE pairings SET claimed_at = ?2, phone_hash = ?3 WHERE code = ?1").run(code, now, sha256(phoneToken));
       // 폰 연결은 앞으로의 동의만 바꾼다. 체크를 끈 채 다시 연결해도 차의 기억·F2 상태는 지우지 않고(해제 때 기억 유지와 같은 규칙), 삭제는 DELETE /v1/consents 로만 한다.
@@ -198,7 +222,7 @@ export class ApiStore {
       if (googleSub !== null) this.db.query("INSERT OR IGNORE INTO google_car (install_id, sub) VALUES (?1, ?2)").run(installId, googleSub);
       else this.db.query("DELETE FROM google_car WHERE install_id = ?1").run(installId);
     })();
-    return { ok: true, phoneToken, character: characterFor(installId) };
+    return { ok: true, phoneToken, character: characterFor(installId), installId, googleName: this.googleNameOfCar(installId) };
   }
 
   /** 연결 해제: 폰 토큰과 대기 코드를 지운다. 기억은 남긴다. */
@@ -211,15 +235,25 @@ export class ApiStore {
   googleLogin(sub: string, givenName: string | null): { phoneToken: string; accountId: string; displayName: string; linkedCar: boolean; isNew: boolean } {
     const phoneToken = randomBytes(32).toString("base64url");
     return this.db.transaction(() => {
+      if (givenName) {
+        const gn = [...givenName].slice(0, MAX_DISPLAY_NAME_CHARS).join("");
+        this.db.query("INSERT INTO google_names (sub, given_name) VALUES (?1, ?2) ON CONFLICT(sub) DO UPDATE SET given_name = ?2").run(sub, gn);
+      }
       const car = this.db.query("SELECT install_id FROM google_car WHERE sub = ?1").get(sub) as { install_id: string } | null;
       if (car) {
+        const old = this.db.query("SELECT phone_hash FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL").get(car.install_id) as { phone_hash: string | null } | null;
         const r = this.db.query("UPDATE pairings SET phone_hash = ?2 WHERE install_id = ?1 AND claimed_at IS NOT NULL").run(car.install_id, sha256(phoneToken));
-        if (r.changes > 0) return { phoneToken, accountId: car.install_id, displayName: this.displayNameOf(car.install_id), linkedCar: true, isNew: false };
+        if (r.changes > 0) {
+          this.replaceToken(old?.phone_hash);
+          return { phoneToken, accountId: car.install_id, displayName: this.displayNameOf(car.install_id), linkedCar: true, isNew: false };
+        }
         this.db.query("DELETE FROM google_car WHERE install_id = ?1").run(car.install_id); // 연결이 사라진 묶음
       }
       const ph = this.db.query("SELECT account_id FROM google_phone WHERE sub = ?1").get(sub) as { account_id: string } | null;
       if (ph) {
+        const old = this.db.query("SELECT token_hash FROM phone_accounts WHERE account_id = ?1").get(ph.account_id) as { token_hash: string } | null;
         this.db.query("UPDATE phone_accounts SET token_hash = ?2 WHERE account_id = ?1").run(ph.account_id, sha256(phoneToken));
+        this.replaceToken(old?.token_hash);
         return { phoneToken, accountId: ph.account_id, displayName: this.displayNameOf(ph.account_id), linkedCar: false, isNew: false };
       }
       const name = givenName ? [...givenName].slice(0, MAX_DISPLAY_NAME_CHARS).join("") : "친구";
@@ -240,6 +274,21 @@ export class ApiStore {
       )
       .get(h) as { sub: string } | null;
     return r?.sub ?? null;
+  }
+
+  /** 이 차에 연결된 폰이 있나. */
+  phoneLinked(installId: string): boolean {
+    return this.db.query("SELECT 1 AS x FROM pairings WHERE install_id = ?1 AND claimed_at IS NOT NULL").get(installId) !== null;
+  }
+
+  /** 계정 요약: 차 계정(묶인 차)인지 폰 전용인지, 구글 이름, 연결 시각. */
+  accountInfo(accountId: string): { accountKind: "car" | "phone"; googleName: string | null; pairedAt: string | null } {
+    if (accountId.startsWith("ph_")) {
+      const r = this.db.query("SELECT n.given_name AS name FROM google_phone p JOIN google_names n ON n.sub = p.sub WHERE p.account_id = ?1").get(accountId) as { name: string } | null;
+      return { accountKind: "phone", googleName: r?.name ?? null, pairedAt: null };
+    }
+    const cur = this.currentPairing(accountId);
+    return { accountKind: "car", googleName: this.googleNameOfCar(accountId), pairedAt: cur.status === "claimed" ? (cur.pairedAt ?? null) : null };
   }
 
   /** 폰만 쓰는 계정(차 없는 친구)을 만든다. 토큰은 해시로만 저장한다. */

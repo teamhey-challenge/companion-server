@@ -26,7 +26,7 @@ interface Llm { replies: string[]; extraction: string; calls: { system: string; 
 
 function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string; proactiveLlmFirstMs?: number } = {}) {
   const s = createServer({
-    port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
+    allowNonGoogleClaim: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     arrivalDelayMs: 30,
     clock,

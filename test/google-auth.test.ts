@@ -156,14 +156,20 @@ describe("linking a car", () => {
     expect((await e.login("sub-bbb")).body.linkedCar).toBe(false);
   });
 
-  test("the same Google account re-claiming its own car is fine; a name-only claim of a linked car clears the binding", async () => {
+  test("the same Google account re-claiming its own car is fine; a non-Google claim is refused with google_login_required (D-57)", async () => {
     const e = await boot();
     const carToken = await e.car("install-aaaa1");
     const a = await e.login("sub-aaa");
     expect((await e.claim(carToken, a.body.phoneToken)).res.status).toBe(200);
     expect((await e.claim(carToken, a.body.phoneToken)).res.status).toBe(200);
-    expect((await e.claim(carToken)).res.status).toBe(200);
-    expect((await e.login("sub-aaa")).body.linkedCar).toBe(false);
+    const noToken = await e.claim(carToken);
+    expect(noToken.res.status).toBe(403);
+    expect(noToken.body.code).toBe("google_login_required");
+    const phoneOnly = (await (await e.call("POST", "/v1/phones/register", undefined, { displayName: "민수" })).json()) as { phoneToken: string };
+    const nonGoogle = await e.claim(carToken, phoneOnly.phoneToken);
+    expect(nonGoogle.res.status).toBe(403);
+    expect(nonGoogle.body.code).toBe("google_login_required");
+    expect((await e.login("sub-aaa")).body.linkedCar).toBe(true);
   });
 
   test("a Google account can bind only one car", async () => {
@@ -198,4 +204,103 @@ test("old DBs without the Google tables still open and gain them", async () => {
   const store = new ApiStore(db, new FakeClock());
   expect(store.googleLogin("s", "민수").isNew).toBe(true);
   new ApiStore(db, new FakeClock());
+});
+
+interface PairErr { error?: string; code?: string; phoneToken?: string }
+/** Test helper: the tests know the response shape of the server they just started. */
+const readJson = async <T>(r: Response): Promise<T> => (await r.json()) as T;
+
+describe("D-57 §4.6 pairing rules and failure codes", () => {
+  type Env = Awaited<ReturnType<typeof boot>>;
+  const newCode = async (e: Env, carToken: string) => readJson<{ pairCode: string; expiresAt: string }>(await e.call("POST", "/v1/pairings", carToken));
+  const claimCode = async (e: Env, code: string, token?: string, body: unknown = { record: true, memory: true }) => {
+    const res = await e.call("POST", `/v1/pairings/${code}/claim`, token, body);
+    return { res, body: await readJson<PairErr>(res.clone()) };
+  };
+
+  test("code is 8 chars valid for 300 s; a new car code expires the previous one at once", async () => {
+    const e = await boot();
+    const carToken = await e.car("install-aaaa1");
+    const g = await e.login("sub-aaa");
+    const first = await newCode(e, carToken);
+    expect(first.pairCode).toMatch(/^[A-Z2-9]{8}$/);
+    expect(Date.parse(first.expiresAt) - e.clock.t).toBe(300_000);
+    const second = await newCode(e, carToken);
+    const old = await claimCode(e, first.pairCode, g.body.phoneToken);
+    expect([old.res.status, old.body.code]).toEqual([410, "expired"]);
+    expect(await readJson<{ status: string }>(await e.call("GET", `/v1/pairings/${first.pairCode}`))).toMatchObject({ status: "expired" });
+    expect((await claimCode(e, second.pairCode, g.body.phoneToken)).res.status).toBe(200);
+  });
+
+  test("every failure row has its own code: unknown, expired (5 min), already_used, record_consent_required, google_login_required", async () => {
+    const e = await boot();
+    const carToken = await e.car("install-aaaa1");
+    const g = await e.login("sub-aaa");
+    const unknown = await claimCode(e, "ZZZZZZZZ", g.body.phoneToken);
+    expect([unknown.res.status, unknown.body.code]).toEqual([404, "unknown"]);
+    const c1 = await newCode(e, carToken);
+    const noRecord = await claimCode(e, c1.pairCode, g.body.phoneToken, { record: false, memory: true });
+    expect([noRecord.res.status, noRecord.body.code]).toEqual([400, "record_consent_required"]);
+    const noGoogle = await claimCode(e, c1.pairCode, undefined);
+    expect([noGoogle.res.status, noGoogle.body.code]).toEqual([403, "google_login_required"]);
+    e.clock.t += 301_000;
+    const expired = await claimCode(e, c1.pairCode, g.body.phoneToken);
+    expect([expired.res.status, expired.body.code]).toEqual([410, "expired"]);
+    const c2 = await newCode(e, carToken);
+    expect((await claimCode(e, c2.pairCode, g.body.phoneToken)).res.status).toBe(200);
+    const used = await claimCode(e, c2.pairCode, g.body.phoneToken);
+    expect([used.res.status, used.body.code]).toEqual([409, "already_used"]);
+  });
+
+  test("google_linked_to_other_car, car_linked_to_other_account and google_verify_failed codes", async () => {
+    const e = await boot();
+    const a = await e.login("sub-aaa");
+    const carA = await e.car("install-aaaa1");
+    const carB = await e.car("install-bbbb1");
+    expect((await claimCode(e, (await newCode(e, carA)).pairCode, a.body.phoneToken)).res.status).toBe(200);
+    const other = await claimCode(e, (await newCode(e, carB)).pairCode, (await e.login("sub-aaa")).body.phoneToken);
+    expect([other.res.status, other.body.code]).toEqual([409, "google_linked_to_other_car"]);
+    const b = await e.login("sub-bbb");
+    const taken = await claimCode(e, (await newCode(e, carA)).pairCode, b.body.phoneToken);
+    expect([taken.res.status, taken.body.code]).toEqual([409, "car_linked_to_other_account"]);
+    const bad = await e.login("sub-ccc", { aud: "nope" });
+    expect([bad.res.status, bad.body.code]).toEqual([401, "google_verify_failed"]);
+  });
+
+  test("one car = one phone: a new Google login elsewhere signs the old phone out with 401 signed_in_elsewhere", async () => {
+    const e = await boot();
+    const carToken = await e.car("install-aaaa1");
+    const g = await e.login("sub-aaa");
+    const c = await claimCode(e, (await newCode(e, carToken)).pairCode, g.body.phoneToken);
+    const phone1 = c.body.phoneToken!;
+    expect((await e.call("GET", "/v1/settings", phone1)).status).toBe(200);
+    const phone2 = (await e.login("sub-aaa")).body.phoneToken;
+    const gone = await e.call("GET", "/v1/settings", phone1);
+    expect(gone.status).toBe(401);
+    expect(await gone.json()).toEqual({ error: "signed_in_elsewhere", code: "signed_in_elsewhere" });
+    expect((await e.call("GET", "/v1/settings", phone2)).status).toBe(200);
+    // phone-only accounts too
+    const p1 = (await e.login("sub-solo")).body.phoneToken;
+    await e.login("sub-solo");
+    expect((await readJson<PairErr>(await e.call("GET", "/v1/account", p1))).code).toBe("signed_in_elsewhere");
+    // a garbage token stays a plain 401
+    expect(await (await e.call("GET", "/v1/settings", "nope")).json()).toEqual({ error: "unauthorized" });
+  });
+
+  test("unpair from the car revokes the phone token and keeps the car; /v1/account and pairings/current carry the Google name", async () => {
+    const e = await boot();
+    const carToken = await e.car("install-aaaa1");
+    const g = await e.login("sub-aaa", { given_name: "지은" });
+    const phoneTok = (await claimCode(e, (await newCode(e, carToken)).pairCode, g.body.phoneToken)).body.phoneToken!;
+    expect(await readJson<object>(await e.call("GET", "/v1/pairings/current", carToken))).toMatchObject({ status: "claimed", googleName: "지은" });
+    expect(await readJson<object>(await e.call("GET", "/v1/account", phoneTok))).toMatchObject({ accountKind: "car", linkedCar: true, googleName: "지은", phoneOnly: null });
+    const solo = await e.login("sub-solo", { given_name: "민수" });
+    expect(await readJson<object>(await e.call("GET", "/v1/account", solo.body.phoneToken))).toMatchObject({ accountKind: "phone", linkedCar: false, googleName: "민수", phoneOnly: { friends: 0, messages: 0, hasData: false } });
+    expect((await e.call("DELETE", "/v1/pairings/current", carToken)).status).toBe(204);
+    expect((await e.call("GET", "/v1/settings", phoneTok)).status).toBe(401);
+    expect((await e.call("GET", "/v1/settings", carToken)).status).toBe(200);
+    expect((await readJson<{ status: string }>(await e.call("GET", "/v1/pairings/current", carToken))).status).not.toBe("claimed");
+    // the Google account is free again (phone-only account)
+    expect((await e.login("sub-aaa")).body.linkedCar).toBe(false);
+  });
 });

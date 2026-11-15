@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { Clock, TimerHandle } from "../src/clock";
 import { Observability } from "../src/observe";
 import { createServer, type RunningServer } from "../src/server";
 import { FakeTts } from "../src/tts";
@@ -8,6 +9,7 @@ import { friendSaid, ga } from "../src/lines";
 const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 50 };
 const DIARY = "오늘은 회사에 같이 다녀왔어. 중간에 쉬면서 이야기도 했어. 같이 달려서 즐거웠어.";
+let diaryFail = false;
 
 let servers: RunningServer[] = [];
 afterEach(() => {
@@ -26,14 +28,16 @@ interface Env {
 
 let diaryGate: Promise<void> | null = null;
 
-function boot(publicPerMin = 5): Env {
+function boot(publicPerMin = 5, clock?: Clock): Env {
   const s = createServer({
-    port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
+    allowNonGoogleClaim: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
-    publicPerMin, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(),
+    publicPerMin, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(), ...(clock ? { clock } : {}),
     fetchImpl: (async (_u: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
-      const text = body.messages[0]!.content.includes("일기") ? (await diaryGate, DIARY) : "그렇구나, 좋아!";
+      const isDiary = body.messages[0]!.content.includes("일기");
+      if (isDiary && diaryFail) return new Response("boom", { status: 500 });
+      const text = isDiary ? (await diaryGate, DIARY) : "그렇구나, 좋아!";
       return new Response(sse(text), { headers: { "content-type": "text/event-stream" } });
     }) as unknown as typeof fetch,
   });
@@ -533,7 +537,7 @@ describe("voice intents in car talk", () => {
     try {
       const carSock = await carSocket(e, a);
       carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
-      carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30 } });
+      carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30, destinationName: "회사" } });
       carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
       await stream.until(() => stream.of("trip_done").length === 1);
       expect((await e.call("DELETE", "/v1/consents/memory", a)).status).toBe(204);
@@ -575,7 +579,7 @@ describe("voice intents in car talk", () => {
     const got = (await e.j<{ messages: { text: string }[] }>(await e.call("GET", "/v1/messages", m2.phoneToken))).messages;
     expect(got.map((m) => m.text)).toEqual(["곧 간다"]);
     expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", m1.phoneToken))).messages).toEqual([]);
-    expect(await say(carSock, "v3", "철수한테 안녕이라고 전해 줘")).toContain("못 찾았어");
+    expect(await say(carSock, "v3", "철수한테 안녕이라고 전해 줘")).toBe("그런 친구는 없어. 폰에서 친구를 먼저 추가해 줘");
   });
 
   test("'고맙다고 전해 줘' right after a friend message replies to that sender", async () => {
@@ -600,5 +604,141 @@ describe("voice intents in car talk", () => {
     const carSock = await carSocket(e, a);
     expect(await say(carSock, "v1", "민수한테 씨발 꺼지라고 전해 줘")).toContain("전하기");
     expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", b.phoneToken))).messages).toEqual([]);
+  });
+
+  test("§6.3 server lines: too long (>120) and unfriended and unknown", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const b = await phone(e, "민수");
+    const { friend } = await befriend(e, a, b.phoneToken);
+    const carSock = await carSocket(e, a);
+    expect(await say(carSock, "v1", `민수한테 ${"가".repeat(121)}라고 전해 줘`)).toBe("조금 짧게 말해 줄래?");
+    expect(await say(carSock, "v2", "민수한테 씨발 꺼지라고 전해 줘")).toBe("그 말은 전하기 어려워");
+    await e.call("POST", "/v1/messages", b.phoneToken, { toFriendId: friend.id, text: "안녕" });
+    expect(await e.call("DELETE", `/v1/friends/${(await friendsOf(e, a))[0]!.id}`, a)).toHaveProperty("status", 204);
+    expect(await say(carSock, "v3", "민수한테 잘 지내라고 전해 줘")).toBe("이제 친구가 아니라서 전할 수 없어");
+    expect(await say(carSock, "v4", "철수한테 잘 지내라고 전해 줘")).toBe("그런 친구는 없어. 폰에서 친구를 먼저 추가해 줘");
+  });
+
+  test("§6.3 queue: while driving at most 3 messages are read in arrival order, then one 'more' line; the rest is read after parking", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const b = await phone(e, "민수");
+    const { friend } = await befriend(e, a, b.phoneToken);
+    const carSock = await carSocket(e, a);
+    carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 40 } });
+    for (const t of ["하나", "둘", "셋", "넷", "다섯"]) await e.call("POST", "/v1/messages", b.phoneToken, { toFriendId: friend.id, text: t });
+    await carSock.until(() => carSock.of("friend_more").length === 1 && carSock.of("reply.end").length === 4, 8000);
+    expect(carSock.of("friend_message").map((f) => f.text)).toEqual(["하나", "둘", "셋", "넷", "다섯"]);
+    expect(carSock.of("reply.end").map((f) => f.text)).toEqual(["민수가 그러는데, 하나", "민수가 그러는데, 둘", "민수가 그러는데, 셋", "친구 말이 더 있어, 멈추면 보여 줄게"]);
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    await carSock.until(() => carSock.of("reply.end").length === 6, 8000);
+    expect(carSock.of("reply.end").slice(4).map((f) => f.text)).toEqual(["민수가 그러는데, 넷", "민수가 그러는데, 다섯"]);
+    expect(carSock.of("friend_more")).toHaveLength(1);
+  });
+});
+
+/** Real timers, but the wall clock can be moved (midnight tests). */
+class SkewClock implements Clock {
+  skew = 0;
+  now() { return Date.now() + this.skew; }
+  setTimeout(fn: () => void, ms: number): TimerHandle { return globalThis.setTimeout(fn, ms) as unknown as TimerHandle; }
+  clearTimeout(h: TimerHandle) { globalThis.clearTimeout(h as unknown as ReturnType<typeof globalThis.setTimeout>); }
+}
+
+describe("§6.4 trip end diary edge cases", () => {
+  const claim = async (e: Env, a: string, memory = true) => {
+    const pc = (await e.j<{ pairCode: string }>(await e.call("POST", "/v1/pairings", a))).pairCode;
+    return (await e.j<{ phoneToken: string }>(await e.call("POST", `/v1/pairings/${pc}/claim`, undefined, { record: true, memory }))).phoneToken;
+  };
+  const drive = (s: Sock, extra: Record<string, unknown> = {}) => {
+    s.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    s.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30, ...extra } });
+    s.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: true } });
+  };
+
+  test("very short trip: one-line diary and the car says the diary is ready", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const phoneTok = await claim(e, a);
+    const stream = await inbox(e, phoneTok);
+    const carSock = await carSocket(e, a);
+    drive(carSock);
+    await stream.until(() => stream.of("diary_ready").length === 1);
+    const done = stream.of("trip_done")[0]!;
+    expect(done).toMatchObject({ carLine: "오늘 일기 써 뒀어, 폰에서 봐!", phoneLinked: true });
+    const d = await e.j<{ summary: string }>(await e.call("GET", `/v1/diary?date=${String(done.date)}`, phoneTok));
+    expect(d.summary).toBe("오늘은 짧게 같이 달렸다");
+  });
+
+  test("no phone linked: the diary is still written on the server and the car says to connect the phone", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    await e.call("POST", "/v1/consents", a, { type: "memory", version: "1", granted: true, channel: "car" });
+    const carSock = await carSocket(e, a);
+    drive(carSock, { destinationName: "회사" });
+    await carSock.until(() => carSock.of("trip_done").length === 1);
+    expect(carSock.of("trip_done")[0]).toMatchObject({ carLine: "폰을 연결하면 일기를 볼 수 있어", phoneLinked: false });
+    const date = String(carSock.of("trip_done")[0]!.date);
+    await Bun.sleep(150);
+    expect((await e.j<{ summary: string }>(await e.call("GET", `/v1/diary?date=${date}`, a))).summary).toBe(DIARY);
+  });
+
+  test("memory off: no diary, no diary_ready, the car only says '오늘도 같이 달렸어'", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const phoneTok = await claim(e, a, false);
+    const stream = await inbox(e, phoneTok);
+    const carSock = await carSocket(e, a);
+    drive(carSock, { destinationName: "회사" });
+    await stream.until(() => stream.of("trip_done").length === 1);
+    expect(stream.of("trip_done")[0]).toMatchObject({ carLine: "오늘도 같이 달렸어" });
+    await Bun.sleep(150);
+    expect(stream.of("diary_ready")).toEqual([]);
+    expect((await e.j<{ summary: unknown; entries: unknown[] }>(await e.call("GET", `/v1/diary`, phoneTok)))).toMatchObject({ summary: null, entries: [] });
+  });
+
+  test("diary write failure: no phone diary_ready push; the next trip end writes it again", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const phoneTok = await claim(e, a);
+    const stream = await inbox(e, phoneTok);
+    const carSock = await carSocket(e, a);
+    diaryFail = true;
+    try {
+      drive(carSock, { destinationName: "회사" });
+      await stream.until(() => stream.of("trip_done").length === 1);
+      await Bun.sleep(200);
+      expect(stream.of("diary_ready")).toEqual([]);
+    } finally {
+      diaryFail = false;
+    }
+    carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30 } });
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: false } });
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: true } });
+    await stream.until(() => stream.of("diary_ready").length >= 1);
+    expect(stream.of("diary_ready")[0]).toEqual({ type: "diary_ready", date: String(stream.of("trip_done")[0]!.date) });
+  });
+
+  test("a trip that crosses midnight goes into the diary of the day it started", async () => {
+    const clock = new SkewClock();
+    const e = boot(5, clock);
+    const a = await car(e, "install-aaaa1", "지은");
+    const phoneTok = await claim(e, a);
+    const stream = await inbox(e, phoneTok);
+    const carSock = await carSocket(e, a);
+    // start the trip at 23:50 KST, end it after midnight
+    const kst = new Date(Date.now() + 9 * 3_600_000);
+    kst.setUTCHours(23, 50, 0, 0);
+    clock.skew = kst.getTime() - 9 * 3_600_000 - Date.now();
+    const startDay = kst.toISOString().slice(0, 10);
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30, destinationName: "회사" } });
+    await Bun.sleep(50);
+    clock.skew += 20 * 60_000;
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: true } });
+    await stream.until(() => stream.of("diary_ready").length === 1);
+    expect(stream.of("trip_done")[0]).toMatchObject({ date: startDay });
+    expect((await e.j<{ summary: string }>(await e.call("GET", `/v1/diary?date=${startDay}`, phoneTok))).summary).toBe(DIARY);
   });
 });
