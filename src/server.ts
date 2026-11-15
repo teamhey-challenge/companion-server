@@ -8,6 +8,7 @@ import { SystemClock, type Clock } from "./clock";
 import type { Observability } from "./observe";
 import { RateLimiter } from "./rate-limit";
 import { CarStore, TicketBook } from "./store";
+import { GoogleVerifier } from "./google";
 import { TalkHub, talkHandlers, type TalkConfig, type WsData } from "./talk";
 import type { TtsProvider } from "./tts";
 
@@ -41,6 +42,10 @@ export interface ServerOptions {
   passengerWebUrl?: string;
   /** 기어 P 를 두면 운전이 끝난 것으로 보는 시간(기본 60초). 시험에서만 바꾼다. */
   tripHoldMs?: number;
+  /** 구글 로그인 웹 클라이언트 ID(GOOGLE_WEB_CLIENT_ID). 없으면 /v1/auth/google 은 503. */
+  googleClientId?: string;
+  /** 구글 공개키(JWKS) 요청용 fetch. 시험에서만 바꾼다. */
+  googleFetch?: typeof fetch;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -56,6 +61,7 @@ export function createServer(o: ServerOptions): RunningServer {
   const cars = new CarStore(o.dbPath, clock);
   const api = new ApiStore(cars.db, clock);
   const tickets = new TicketBook(clock);
+  const google = o.googleClientId ? new GoogleVerifier(o.googleClientId, clock, o.googleFetch) : null;
   const talkHub = new TalkHub();
   const provider = getProvider(o.talk.providerName);
   /** 일기 글쓰기: 말하는 것과 같은 모델·키. 키가 없으면 일기 요약은 만들지 않는다. */
@@ -144,6 +150,7 @@ export function createServer(o: ServerOptions): RunningServer {
         throttled,
         publicPerMin: o.publicPerMin ?? 20,
         reject: (r) => o.observer.reject(r),
+        google,
       });
       if (apiRes) return apiRes;
       const isInbox = url.pathname === "/v1/inbox/stream";

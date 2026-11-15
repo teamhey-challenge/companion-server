@@ -13,6 +13,7 @@ import {
 import type { ApiStore, Principal, ServerSettings, ServerSettingsPatch } from "./api-store";
 import { LOOK_MAX, MAX_DISPLAY_NAME_CHARS, characterFor } from "./api-store";
 import { bearer } from "./auth";
+import type { GoogleVerifier } from "./google";
 import type { Social } from "./social";
 import { INVITE_CODE_RE, MAX_MESSAGE_CHARS } from "./social-store";
 import type { CarStore, TicketBook } from "./store";
@@ -47,6 +48,8 @@ export interface ApiDeps {
   throttled: (ip: string, bucket: string, max: number) => boolean;
   publicPerMin: number;
   reject: (reason: string) => void;
+  /** GOOGLE_WEB_CLIENT_ID 가 없으면 null → /v1/auth/google 은 503. */
+  google: GoogleVerifier | null;
 }
 
 /** 차 토큰이면 car, 폰 토큰이면 phone. 둘 다 그 토큰이 속한 차 하나만 가리킨다. */
@@ -110,6 +113,18 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   const m = req.method;
 
   // ---- 토큰 없는 공개 경로(폰 연결 전) ----
+  if (path === "/v1/auth/google" && m === "POST") {
+    if (d.throttled(ip, "gauth", d.publicPerMin)) return json({ error: "rate_limited" }, 429);
+    if (!d.google) return json({ error: "google_login_unconfigured", code: "google_login_unconfigured" }, 503);
+    const b = await readJson(req);
+    if (!isObj(b) || typeof b.idToken !== "string" || b.idToken.length === 0 || b.idToken.length > 8192) return bad();
+    const v = await d.google.verify(b.idToken);
+    if (!v.ok) {
+      d.reject(`google.${v.reason}`);
+      return v.reason === "jwks_unavailable" ? json({ error: "google_unavailable" }, 503) : json({ error: "invalid_token" }, 401);
+    }
+    return json(d.api.googleLogin(v.claims.sub, v.claims.givenName));
+  }
   if (path === "/v1/phones/register" && m === "POST") {
     if (d.throttled(ip, "phreg", d.publicPerMin)) return json({ error: "rate_limited" }, 429);
     const b = await readJson(req);
@@ -131,8 +146,13 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     if (!isObj(body) || typeof body.record !== "boolean" || typeof body.memory !== "boolean") return bad();
     if (!body.record) return bad("record_required");
     if (!PAIR_CODE_RE.test(code)) return json({ error: "unknown" }, 404);
-    const r = d.api.claimPairing(code, body.record, body.memory);
-    if (!r.ok) return json({ error: r.reason }, r.reason === "unknown" ? 404 : r.reason === "claimed" ? 409 : 410);
+    const bearerToken = bearer(req.headers);
+    const googleSub = bearerToken ? d.api.googleSubOfPhoneToken(bearerToken) : null;
+    const r = d.api.claimPairing(code, body.record, body.memory, googleSub);
+    if (!r.ok) {
+      if (r.reason === "car_linked_to_other_account" || r.reason === "google_linked_to_other_car") return json({ error: r.reason, code: r.reason }, 409);
+      return json({ error: r.reason }, r.reason === "unknown" ? 404 : r.reason === "claimed" ? 409 : 410);
+    }
     return json({ phoneToken: r.phoneToken, character: r.character });
   }
 
