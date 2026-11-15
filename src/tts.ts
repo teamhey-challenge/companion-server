@@ -468,7 +468,22 @@ interface Job {
   error: Error | undefined;
   wake: (() => void) | undefined;
   filler: boolean;
+  /** 이 조각이 문장 끝(. ! ? … 로 끝남)인지: 다음 조각 앞의 쉼 길이를 정한다. */
+  sentenceEnd: boolean;
 }
+
+/** 문장 사이 쉼(ms). Breeze 가 조각 앞뒤 무음을 잘라 내 이어 붙이면 붙어 들린다. 방출할 때 끼우고 캐시에는 넣지 않는다. 고래 목소리도 같다(whale_voice.json 의 0.35초). */
+export const GAP_AFTER_SENTENCE_MS = 350;
+/** 쉼표·띄어쓰기에서 일찍 자른 조각 뒤의 쉼(ms). */
+export const GAP_AFTER_CLAUSE_MS = 180;
+
+/** 쉼의 PCM(0 바이트). 길이는 항상 샘플 크기의 배수다. */
+export function silencePcm(ms: number): Uint8Array {
+  const samples = Math.round((PCM_FORMAT.sampleRate * ms) / 1000);
+  return new Uint8Array(samples * 2 * PCM_FORMAT.channels);
+}
+
+const SENTENCE_END = /[.!?…。！？]["'”’)\]」』]*\s*$/u;
 
 /**
  * 문장이 완성되는 대로 TTS 를 시작하고, 결과 PCM 을 문장 순서대로 내보낸다. 동시 생성 수 제한은 제공자(GatedTts)가 맡는다.
@@ -501,7 +516,7 @@ export class AudioPipeline {
    */
   add(sentence: string, filler = false): void {
     if (this.failed) return;
-    const job: Job = { chunks: [], done: false, error: undefined, wake: undefined, filler };
+    const job: Job = { chunks: [], done: false, error: undefined, wake: undefined, filler, sentenceEnd: SENTENCE_END.test(sentence) };
     this.jobs.push(job);
     this.tail = this.tail.then(() => this.generate(job, sentence));
     this.kick?.();
@@ -536,6 +551,8 @@ export class AudioPipeline {
 
   private async drain(): Promise<void> {
     let started = false;
+    /** 마지막으로 소리를 낸 답 조각(채움말 제외). 다음 답 조각 앞에 쉼을 끼울지 정한다. */
+    let prevAnswer: Job | undefined;
     for (let i = 0; ; i++) {
       while (i >= this.jobs.length && !this.closed) await this.wait((w) => (this.kick = w));
       if (this.signal.aborted) return;
@@ -548,6 +565,10 @@ export class AudioPipeline {
           if (!started) {
             started = true;
             this.sink.onStart(true);
+          }
+          if (sent === 0 && !job.filler) {
+            if (prevAnswer) this.sink.onChunk(silencePcm(prevAnswer.sentenceEnd ? GAP_AFTER_SENTENCE_MS : GAP_AFTER_CLAUSE_MS), false);
+            prevAnswer = job;
           }
           this.sink.onChunk(c, job.filler);
           sent++;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type RunningServer } from "../src/server";
 import { Observability } from "../src/observe";
 import { L, fixedPieces, pick, primePieces } from "../src/lines";
-import { AudioPipeline, BreezeTts, FakeTts, GatedTts, PhraseCache, Semaphore, SentenceSplitter, loadTtsConfig, TtsError, type TtsProvider } from "../src/tts";
+import { AudioPipeline, BreezeTts, FakeTts, GAP_AFTER_CLAUSE_MS, GAP_AFTER_SENTENCE_MS, GatedTts, PCM_FORMAT, PhraseCache, Semaphore, SentenceSplitter, loadTtsConfig, silencePcm, TtsError, type TtsProvider } from "../src/tts";
 
 describe("SentenceSplitter", () => {
   test("splits at sentence ends and keeps the tail for flush", () => {
@@ -39,8 +39,40 @@ describe("AudioPipeline", () => {
 
   test("chunks arrive in sentence order after a single start", async () => {
     const fake = new FakeTts();
-    expect(await run(fake, ["첫 문장입니다.", "둘째 문장입니다."])).toEqual(["start", "chunk1", "chunk2", "chunk3", "chunk1", "chunk2", "chunk3"]);
+    expect(await run(fake, ["첫 문장입니다.", "둘째 문장입니다."])).toEqual(["start", "chunk1", "chunk2", "chunk3", "chunk0", "chunk1", "chunk2", "chunk3"]);
     expect(fake.calls).toEqual(["첫 문장입니다.", "둘째 문장입니다."]);
+  });
+  const pcmOf = async (sentences: Array<[string, boolean?]>) => {
+    const out: Uint8Array[] = [];
+    const ac = new AbortController();
+    const p = new AudioPipeline(new FakeTts(), ac.signal, { onStart: () => {}, onChunk: (c) => out.push(c), onError: () => {} });
+    for (const [s, filler] of sentences) p.add(s, filler);
+    p.finish();
+    await p.done;
+    return out;
+  };
+  const bytesPerMs = (PCM_FORMAT.sampleRate * 2 * PCM_FORMAT.channels) / 1000;
+  test("two sentences: PCM = s1 + 350ms silence + s2", async () => {
+    const out = await pcmOf([["첫 문장입니다."], ["둘째 문장입니다."]]);
+    const one = out.slice(0, 3);
+    expect(out.length).toBe(7);
+    expect(out[3]!.length).toBe(GAP_AFTER_SENTENCE_MS * bytesPerMs);
+    expect(out[3]!.every((b) => b === 0)).toBe(true);
+    expect(out.slice(4)).toEqual(one);
+  });
+  test("a comma-cut piece is followed by a 180ms gap", async () => {
+    const out = await pcmOf([["안녕하세요 오늘은,"], ["날씨가 좋네요."]]);
+    expect(out[3]!.length).toBe(GAP_AFTER_CLAUSE_MS * bytesPerMs);
+  });
+  test("no silence before the first piece or around fillers", async () => {
+    const out = await pcmOf([["음… 잠깐만!", true], ["첫 문장입니다."], ["둘째 문장입니다."]]);
+    // 채움말 3조각 + 첫 답 3조각 바로 이어짐, 둘째 앞에만 쉼
+    expect(out.length).toBe(10);
+    expect(out[3]![0]).toBe(1);
+    expect(out[6]!.length).toBe(GAP_AFTER_SENTENCE_MS * bytesPerMs);
+  });
+  test("silence is sample-aligned", () => {
+    for (const ms of [GAP_AFTER_SENTENCE_MS, GAP_AFTER_CLAUSE_MS, 1, 7]) expect(silencePcm(ms).length % (2 * PCM_FORMAT.channels)).toBe(0);
   });
   test("one turn asks the provider for one sentence at a time, in order", async () => {
     const fake = new FakeTts(5);
@@ -295,8 +327,9 @@ describe("server with TTS", () => {
     const { order, bytes } = await turn(new FakeTts(), two);
     expect(order[0]).toBe("start:pcm");
     expect(order.at(-1)).toBe("reply.end");
-    expect(bytes.length).toBe(6); // ctx 없음 = 주행: 3문장 중 앞 2문장만 말한다(PLEOS-125)
-    expect(bytes.every((b) => b === 480)).toBe(true);
+    expect(bytes.length).toBe(7); // ctx 없음 = 주행: 3문장 중 앞 2문장만 말한다(PLEOS-125) + 문장 사이 쉼 1조각
+    expect(bytes.filter((b) => b === 480).length).toBe(6);
+    expect(bytes.filter((b) => b !== 480)).toEqual([GAP_AFTER_SENTENCE_MS * 48]);
     expect(order.indexOf("bin")).toBeGreaterThan(0);
     expect(order.filter((o) => o === "reply.delta").length).toBeGreaterThan(0);
   });
@@ -381,7 +414,7 @@ describe("server with TTS", () => {
     await promise;
     ws.close();
     const timing: Record<string, number> = JSON.parse(lines.find((l) => l.includes('"talk.timing"'))!);
-    expect(bins).toBe(9); // 채움말 3조각 + 답 두 문장 6조각
+    expect(bins).toBe(10); // 채움말 3조각 + 답 두 문장 6조각 + 쉼 1조각
     expect(timing.filler_ms).toBeGreaterThan(0);
     expect(timing.first_audio_ms).toBe(timing.filler_ms);
     expect(timing.first_tts_byte_ms).toBeGreaterThan(timing.filler_ms!);
