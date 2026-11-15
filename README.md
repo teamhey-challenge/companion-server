@@ -70,8 +70,29 @@
 | `COMPANION_TURNS_PER_MIN` | `20` | 연결별 turn 한도(분). 초과 시 `{"type":"error","code":"rate_limited"}`, LLM 호출 없음 |
 | `COMPANION_TURNS_PER_DAY` | `300` | 서버 전체 하루 turn 한도(LLM 비용 상한). 같은 응답 |
 | `HOST` | 모든 인터페이스 | 바인드 주소. 컨테이너 없이 쓸 때는 `127.0.0.1` 권장 |
+| `PASSENGER_WEB_URL` | `https://hey.lastmile.ltd` | 친구 초대 링크의 앞부분. 링크는 `${PASSENGER_WEB_URL}/f/{코드}` |
 
 `/healthz`는 인증 없이 열려 있고 공개 요청에는 `{"ok":true}`만 돌려준다. provider·model·오류 집계는 프록시 헤더 없는 루프백 요청에만 나온다.
+
+## 친구·메시지·일기 (D-47)
+
+계정은 차의 `install_id`(폰이 페어링되어 있으면 같은 계정)이고, 차 없는 친구는 `POST /v1/phones/register {displayName}`로 폰 전용 계정(`ph_…`)과 폰 토큰을 받는다(IP별 분당 한도, 동의는 별도 `POST /v1/consents`). 폰은 `POST /v1/phone-sessions`로 소켓마다 한 번 쓰는 티켓을 받아 `/v1/talk`(차와 같은 프레임)와 `/v1/inbox/stream`(서버→폰 푸시만)에 연결한다.
+
+| 경로 | 내용 |
+|---|---|
+| `POST /v1/friends/invites` | `{code,url,expiresAt}`, 6자 코드 24시간(여러 명이 쓸 수 있다) |
+| `POST /v1/friends/invites/{code}/accept` | 서로 친구, `{friend}`. 자기 코드 400, 모르는 코드 404, 만료 410 |
+| `GET /v1/friends` · `DELETE /v1/friends/{id}` · `PATCH /v1/friends/{id} {shareArrival}` | 목록(배열), 끊기(양쪽 삭제), 도착 알리기(기본 꺼짐) |
+| `POST /v1/messages {toFriendId,text}` | 120자 이하, 안전 필터(욕설·링크·위험·자해·성적·혐오). 걸리면 `422 {error:"message_blocked",code:"message_blocked"}` |
+| `GET /v1/messages?since=` | `{messages:[{id,direction:"in"\|"out",friendId,friendName,text,at}]}` 최신순, 신고된 것 제외 |
+| `POST /v1/messages/{id}/report` | 받은 사람만, 204. 메시지는 숨겨지고 `message_reports`에 남는다 |
+| `GET /v1/diary?date=` | `{date,entries:[{at,text,kind}],summary}`. kind: `trip_start`·`trip_done`·`friend_message`·`charging` |
+
+푸시: 차 소켓은 `friend_message`/`friend_arrived` JSON 뒤에 `reply.start`·PCM·`reply.end`(turnId = 프레임 id)로 헤이리 목소리를 받는다(TTS 없으면 `audio:"none"`). 폰 받은편지함은 `friend_message`·`friend_arrived`·`trip_done`·`diary_ready`를 받는다. 못 읽어 준 메시지는 차가 연결될 때 최근 5개를 읽어 준다.
+
+말로 전하기: "○○한테 … 전해 줘"(이름이 겹치면 되묻고 다음 답으로 보낸다), 방금 온 메시지(10분 안)에는 "고맙다고 전해 줘"처럼 이름 없이. 보낸 뒤 "○○한테 전했어!"로 확인한다.
+
+운전 끝: ctx `gear:"P"` + `driverDoorOpen`(또는 `doorOpen`)이 새로 열림, 못 보면 P 60초. 이때 폰에 `trip_done`을 보내고 그날 일기를 LLM(헤이리 목소리, 3~5문장, 목적지 이름만·좌표 없음)으로 쓰면 `diary_ready`. 도착 알림은 ctx `arrived:true`(없으면 운전 끝)에서 `shareArrival`을 켠 친구에게만, 장소는 ctx `destinationName`(좌표처럼 보이면 버림).
 
 ## 점검
 

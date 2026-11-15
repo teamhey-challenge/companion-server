@@ -47,6 +47,10 @@ export class CarStore {
 export interface Ticket {
   sessionId: string;
   installId: string;
+  /** 어느 소켓에 쓰는 티켓인가: 대화(/v1/talk) 또는 폰 받은편지함(/v1/inbox/stream) */
+  channel: "talk" | "inbox" | "any";
+  /** 티켓을 받은 쪽(차 앱 또는 폰) */
+  kind: "car" | "phone";
 }
 
 /** 한 번만 쓸 수 있는 짧은 웹소켓 티켓. 메모리에만 둔다(재시작하면 새로 받으면 된다). */
@@ -55,14 +59,14 @@ export class TicketBook {
 
   constructor(private readonly clock: Clock) {}
 
-  issue(installId: string): Ticket & { wsTicket: string; expiresInSec: number } {
+  issue(installId: string, channel: Ticket["channel"] = "talk", kind: Ticket["kind"] = "car"): Ticket & { wsTicket: string; expiresInSec: number } {
     const now = this.clock.now();
     for (const [k, v] of this.tickets) if (v.exp <= now) this.tickets.delete(k);
     while (this.tickets.size >= MAX_TICKETS) this.tickets.delete(this.tickets.keys().next().value as string);
     const wsTicket = secret();
     const sessionId = crypto.randomUUID();
-    this.tickets.set(sha256(wsTicket), { sessionId, installId, exp: now + TICKET_TTL_SEC * 1000 });
-    return { sessionId, installId, wsTicket, expiresInSec: TICKET_TTL_SEC };
+    this.tickets.set(sha256(wsTicket), { sessionId, installId, channel, kind, exp: now + TICKET_TTL_SEC * 1000 });
+    return { sessionId, installId, channel, kind, wsTicket, expiresInSec: TICKET_TTL_SEC };
   }
 
   /** 성공하면 티켓은 즉시 지워진다. */
@@ -71,6 +75,6 @@ export class TicketBook {
     const t = this.tickets.get(key);
     if (!t) return null;
     this.tickets.delete(key);
-    return t.exp > this.clock.now() ? { sessionId: t.sessionId, installId: t.installId } : null;
+    return t.exp > this.clock.now() ? { sessionId: t.sessionId, installId: t.installId, channel: t.channel, kind: t.kind } : null;
   }
 }

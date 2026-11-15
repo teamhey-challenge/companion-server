@@ -1,4 +1,6 @@
 import type { PairingStatus, RegisterResponse, SessionResponse, Settings } from "../shared/packages/protocol/src/index";
+import { Social, type DiaryLlm } from "./social";
+import { getProvider, streamLlm } from "./llm/providers";
 import { handleApi } from "./api";
 import { ApiStore } from "./api-store";
 import { bearer, clientIp, isLocalRequest, safeEqual, type GuardConfig } from "./auth";
@@ -33,6 +35,10 @@ export interface ServerOptions {
   llmDeadlineMs?: number;
   /** 기억 담은 먼저 말(도착·첫 인사)이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
   proactiveLlmFirstMs?: number;
+  /** 초대 링크 앞부분(PASSENGER_WEB_URL). 끝 슬래시는 뗀다. */
+  passengerWebUrl?: string;
+  /** 기어 P 를 두면 운전이 끝난 것으로 보는 시간(기본 60초). 시험에서만 바꾼다. */
+  tripHoldMs?: number;
 }
 
 const INSTALL_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -49,6 +55,17 @@ export function createServer(o: ServerOptions): RunningServer {
   const api = new ApiStore(cars.db, clock);
   const tickets = new TicketBook(clock);
   const talkHub = new TalkHub();
+  const provider = getProvider(o.talk.providerName);
+  /** 일기 글쓰기: 말하는 것과 같은 모델·키. 키가 없으면 일기 요약은 만들지 않는다. */
+  const diaryLlm: DiaryLlm | null = o.talk.apiKey
+    ? async (system, user) => {
+        let out = "";
+        const req = { model: o.talk.model, system, userText: user, maxTokens: 300, baseUrl: o.talk.baseUrl };
+        for await (const d of streamLlm(provider, req, o.talk.apiKey!, o.fetchImpl ?? fetch, undefined, AbortSignal.timeout(30_000))) out += d;
+        return out;
+      }
+    : null;
+  const social = new Social(api, cars.db, clock, talkHub, o.observer, diaryLlm);
 
   const throttled = (ip: string, bucket: string, max: number) => {
     try {
@@ -86,6 +103,8 @@ export function createServer(o: ServerOptions): RunningServer {
     return json(res);
   }
 
+  const talk = talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs, llmDeadlineMs: o.llmDeadlineMs, proactiveLlmFirstMs: o.proactiveLlmFirstMs, social, tripHoldMs: o.tripHoldMs });
+
   const server = Bun.serve<WsData>({
     port: o.port,
     hostname: o.hostname,
@@ -108,6 +127,9 @@ export function createServer(o: ServerOptions): RunningServer {
       const apiRes = await handleApi(req, url, ip, {
         api,
         cars,
+        social,
+        tickets,
+        passengerWebUrl: (o.passengerWebUrl ?? "https://hey.lastmile.ltd").replace(/\/+$/, ""),
         pushSettings: (id, s) => {
           talkHub.pushSettings(id, s);
           o.hub?.pushSettings(id, s);
@@ -122,19 +144,26 @@ export function createServer(o: ServerOptions): RunningServer {
         reject: (r) => o.observer.reject(r),
       });
       if (apiRes) return apiRes;
-      if (url.pathname !== "/v1/talk") return new Response("not found", { status: 404 });
+      const isInbox = url.pathname === "/v1/inbox/stream";
+      if (url.pathname !== "/v1/talk" && !isInbox) return new Response("not found", { status: 404 });
       if (throttled(ip, "up", o.guard.upgradesPerMin)) return new Response("rate limited", { status: 429 });
       const ticket = url.searchParams.get("ticket");
       const t = ticket ? tickets.consume(ticket) : null;
-      if (!t) {
-        o.observer.reject("talk.unauthorized");
+      if (!t || (isInbox && t.kind !== "phone")) {
+        o.observer.reject(isInbox ? "inbox.unauthorized" : "talk.unauthorized");
         return new Response("unauthorized", { status: 401 });
       }
-      const data: WsData = { id: crypto.randomUUID(), installId: t.installId, sessionId: t.sessionId, hello: false };
+      const data: WsData = { id: crypto.randomUUID(), installId: t.installId, sessionId: t.sessionId, hello: false, kind: t.kind, inbox: isInbox };
       if (srv.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     },
-    websocket: { ...talkHandlers(o.talk, o.observer, { guard: o.guard, limiter, fetchImpl: o.fetchImpl, tts: o.tts, store: api, hub: talkHub, clock, arrivalDelayMs: o.arrivalDelayMs, fillerAfterMs: o.fillerAfterMs, llmDeadlineMs: o.llmDeadlineMs, proactiveLlmFirstMs: o.proactiveLlmFirstMs }), maxPayloadLength: 4 * 1024 },
+    websocket: {
+      open: (ws) => (ws.data.inbox ? social.inbox.add(ws) : talk.open(ws)),
+      close: (ws) => (ws.data.inbox ? social.inbox.remove(ws) : talk.close(ws)),
+      // 받은편지함 소켓은 서버가 보내기만 한다. 폰이 보낸 말은 무시한다.
+      message: (ws, data) => (ws.data.inbox ? undefined : talk.message(ws, data)),
+      maxPayloadLength: 4 * 1024,
+    },
   });
   const stop = server.stop.bind(server);
   server.stop = (force?: boolean) => {
