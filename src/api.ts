@@ -9,11 +9,9 @@ import {
   type ConsentChannel,
   type ConsentType,
   type PairingStatus,
-  type Settings,
-  type SettingsPatch,
 } from "../shared/packages/protocol/src/index";
-import type { ApiStore, Principal } from "./api-store";
-import { characterFor } from "./api-store";
+import type { ApiStore, Principal, ServerSettings, ServerSettingsPatch } from "./api-store";
+import { LOOK_MAX, characterFor } from "./api-store";
 import { bearer } from "./auth";
 import type { CarStore } from "./store";
 
@@ -26,13 +24,13 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_VEHICLE_EVENTS = 50;
 const MAX_MEMORY_PAGE = 100;
 const DEFAULT_MEMORY_PAGE = 50;
-const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname"] as const;
+const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname", "bodyColor", "hat", "neck"] as const;
 
 export interface ApiDeps {
   api: ApiStore;
   cars: CarStore;
   /** 설정이 바뀌면 그 차의 열린 소켓에 settings 프레임을 보낸다. */
-  pushSettings?: (installId: string, settings: Settings) => void;
+  pushSettings?: (installId: string, settings: ServerSettings) => void;
   /** 폰·차가 연결을 해제하면 그 차의 열린 소켓에 pairing(none) 프레임을 보낸다. */
   pushPairing?: (installId: string, status: PairingStatus) => void;
   /** 동의가 바뀌면 그 차의 열린 소켓이 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
@@ -65,7 +63,7 @@ async function readJson(req: Request): Promise<unknown> {
   }
 }
 
-function parsePatch(body: unknown): SettingsPatch | null {
+function parsePatch(body: unknown): ServerSettingsPatch | null {
   if (!isObj(body)) return null;
   const patch: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(body)) {
@@ -73,6 +71,13 @@ function parsePatch(body: unknown): SettingsPatch | null {
     if (k === "proactive" && !(PROACTIVE_LEVELS as readonly unknown[]).includes(v)) return null;
     if (k === "speech" && !(SPEECH_STYLES as readonly unknown[]).includes(v)) return null;
     if (k === "memoryEnabled" && typeof v !== "boolean") return null;
+    if (k === "bodyColor" || k === "hat" || k === "neck") {
+      // bodyColor null = follow the theme again; hat/neck have no "unset", 0 is none.
+      const ok = Number.isInteger(v) && (v as number) >= 0 && (v as number) <= LOOK_MAX[k];
+      if (!ok && !(k === "bodyColor" && v === null)) return null;
+      patch[k] = v;
+      continue;
+    }
     if (k === "nickname") {
       if (v !== null && typeof v !== "string") return null;
       const t = typeof v === "string" ? v.trim() : null;
@@ -82,7 +87,7 @@ function parsePatch(body: unknown): SettingsPatch | null {
     }
     patch[k] = v;
   }
-  return Object.keys(patch).length > 0 ? (patch as SettingsPatch) : null;
+  return Object.keys(patch).length > 0 ? (patch as ServerSettingsPatch) : null;
 }
 
 /** /v1/consents, /v1/pairings, /v1/memory, /v1/settings, /v1/vehicle-events. 해당 없으면 null. */

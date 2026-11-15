@@ -262,13 +262,34 @@ test("public pairing lookup is rate limited per IP", async () => {
 test("settings PATCH pushes to the hub and validates input", async () => {
   const { call, car, pushed } = boot();
   const a = await car("install-aaaa1");
-  expect(await (await call("GET", "/v1/settings", a)).json()).toEqual({ proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null });
+  expect(await (await call("GET", "/v1/settings", a)).json()).toEqual({ proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0 });
   expect((await call("PATCH", "/v1/settings", a, { proactive: "high" })).status).toBe(200);
   expect(pushed.length).toBe(1);
   expect((await call("PATCH", "/v1/settings", a, { proactive: "loud" })).status).toBe(400);
   expect((await call("PATCH", "/v1/settings", a, { nickname: "가".repeat(21) })).status).toBe(400);
   expect((await call("PATCH", "/v1/settings", a, { bogus: 1 })).status).toBe(400);
   expect(pushed.length).toBe(1);
+});
+
+test("look settings (D-41): validated ranges, null bodyColor follows the theme, phone can read but not write", async () => {
+  const { call, car, pair, pushed } = boot();
+  const a = await car("install-aaaa1");
+  const ok = await call("PATCH", "/v1/settings", a, { bodyColor: 1, hat: 2, neck: 1 });
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toMatchObject({ bodyColor: 1, hat: 2, neck: 1 });
+  expect(pushed.length).toBe(1);
+  for (const bad of [{ hat: 3 }, { hat: -1 }, { hat: 1.5 }, { hat: "1" }, { hat: null }, { neck: 2 }, { bodyColor: 2 }, { bodyColor: "0" }]) {
+    expect((await call("PATCH", "/v1/settings", a, bad)).status).toBe(400);
+  }
+  expect(pushed.length).toBe(1);
+  // other settings keep the look; bodyColor null goes back to following the theme
+  await call("PATCH", "/v1/settings", a, { proactive: "low" });
+  expect(await (await call("GET", "/v1/settings", a)).json()).toMatchObject({ bodyColor: 1, hat: 2, neck: 1, proactive: "low" });
+  await call("PATCH", "/v1/settings", a, { bodyColor: null });
+  expect(await (await call("GET", "/v1/settings", a)).json()).toMatchObject({ bodyColor: null, hat: 2, neck: 1 });
+  const p = (await pair(a)).phoneToken;
+  expect(await (await call("GET", "/v1/settings", p)).json()).toMatchObject({ hat: 2, neck: 1 });
+  expect((await call("PATCH", "/v1/settings", p, { hat: 0 })).status).toBe(403);
 });
 
 test("memory consent drives settings.memoryEnabled (PLEOS-129)", async () => {
