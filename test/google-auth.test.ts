@@ -104,6 +104,31 @@ describe("POST /v1/auth/google", () => {
     expect((await e.call("GET", "/v1/friends", after.body.phoneToken)).status).toBe(403);
   });
 
+  test("DELETE /v1/phone-sessions/current ends only that token; signing in again restores the car account (linkedCar true) and an unlinked account stays unlinked", async () => {
+    const e = await boot();
+    const g = await e.login("sub-out");
+    expect((await e.claim(await e.car("install-out01"), g.body.phoneToken)).res.status).toBe(200);
+    const l = await e.login("sub-out");
+    const t = l.body.phoneToken;
+    await e.call("PATCH", "/v1/settings", t, { nickname: "하늘" });
+    const before = await (await e.call("GET", "/v1/settings", t)).json();
+    expect((await e.call("DELETE", "/v1/phone-sessions/current", t)).status).toBe(204);
+    expect((await e.call("GET", "/v1/settings", t)).status).toBe(401);
+    expect((await e.call("DELETE", "/v1/phone-sessions/current", t)).status).toBe(401);
+    const again = await e.login("sub-out");
+    expect(again.body).toMatchObject({ accountId: l.body.accountId, linkedCar: true, isNew: false });
+    expect(again.body.phoneToken).not.toBe(t);
+    expect(await (await e.call("GET", "/v1/settings", again.body.phoneToken)).json()).toEqual(before);
+    expect(await (await e.call("GET", "/v1/account", again.body.phoneToken)).json()).toMatchObject({ linkedCar: true });
+
+    const u = await e.login("sub-unl");
+    expect((await e.call("DELETE", "/v1/phone-sessions/current", u.body.phoneToken)).status).toBe(204);
+    expect((await e.call("GET", "/v1/account", u.body.phoneToken)).status).toBe(401);
+    const u2 = await e.login("sub-unl");
+    expect(u2.body).toMatchObject({ accountId: u.body.accountId, linkedCar: false, isNew: false });
+    expect((await e.call("GET", "/v1/account", u2.body.phoneToken)).status).toBe(200);
+  });
+
   test("friend invite between two car accounts works", async () => {
     const e = await boot();
     const a = await e.login("sub-fa");

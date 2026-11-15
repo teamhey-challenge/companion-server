@@ -315,6 +315,15 @@ export class ApiStore {
     return p?.account_id ?? null;
   }
 
+  /** 폰 로그아웃: 이 토큰 하나만 무효로 만든다. 기억·일기·친구·설정·구글 묶음은 그대로라 다시 로그인하면 돌아온다. 폰 전용 계정은 token_hash 를 아무도 낼 수 없는 값으로 바꾼다. */
+  revokePhoneToken(token: string): void {
+    const h = sha256(token);
+    this.db.transaction(() => {
+      this.db.query("UPDATE pairings SET phone_hash = NULL WHERE phone_hash = ?1").run(h);
+      this.db.query("UPDATE phone_accounts SET token_hash = ?2 WHERE token_hash = ?1").run(h, `revoked:${randomBytes(16).toString("hex")}`);
+    })();
+  }
+
   // ---- 기억 ----
   addMemory(installId: string, kind: MemoryKind, text: string): MemoryItem {
     // 같은 차에 같은 문장(종류가 달라도)이 이미 있으면 새로 쓰지 않고 기존 항목을 돌려준다.
