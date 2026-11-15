@@ -11,6 +11,12 @@ const MODEL_ID = "breeze-tts-2-multilingual";
 const LANGUAGE = "ko";
 const MAX_CONCURRENT = 2;
 
+/** 고래 목소리 속도(기획 whale_voice.json): 1.5배, 15자 안팎의 짧은 조각은 끝 음절이 묻혀 1.4배. */
+export const WHALE_SPEED = 1.5;
+export const WHALE_SPEED_SHORT = 1.4;
+export const WHALE_SHORT_CHARS = 15;
+export const whaleSpeed = (text: string): number => ([...text.trim()].length <= WHALE_SHORT_CHARS ? WHALE_SPEED_SHORT : WHALE_SPEED);
+
 export interface TtsConfig {
   provider: "breeze" | "fake" | "off";
   apiKey: string | undefined;
@@ -109,7 +115,7 @@ export class BreezeTts implements TtsProvider {
       method: "POST",
       headers: { "xi-api-key": this.cfg.apiKey ?? "", "content-type": "application/json" },
       // hey_voice.json: instructions 는 넣지 않는다(원본과 유사도가 떨어짐)
-      body: JSON.stringify({ text, model_id: MODEL_ID, language_code: LANGUAGE, voice_settings: { use_speaker_boost: true } }),
+      body: JSON.stringify({ text, model_id: MODEL_ID, language_code: LANGUAGE, voice_settings: voice === "whale" ? { use_speaker_boost: true, speed: whaleSpeed(text) } : { use_speaker_boost: true } }),
       signal,
     });
   }

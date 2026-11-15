@@ -19,7 +19,7 @@ import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError
 import { friendNotFound, sentToFriend } from "./lines";
 import { placeName, type Social } from "./social";
 import { matchFriends, parseSendIntent } from "./voice-intents";
-import { WHALE_LINES, cleanOnboardingAnswer, greetingInstruction, parseOnboardingFrame, parseOnboardingName, topicsMemory, tripsMemory, type OnboardingAnswers, type OnboardingStep, type QuestionStep } from "./onboarding";
+import { ACK_LLM_FIRST_MS, CONSENT_FREE_STEPS, HEYRI_LINES, WHALE_LINES, ackFallback, ackInstruction, cleanOnboardingAnswer, greetingInstruction, parseOnboardingFrame, parseOnboardingName, topicsMemory, tripsMemory, type OnboardingAnswers, type OnboardingStep, type QuestionStep } from "./onboarding";
 
 /** 기어 P 를 이만큼 두면(문 열림을 못 봐도) 운전이 끝난 것으로 본다. */
 const TRIP_HOLD_MS = 60_000;
@@ -197,6 +197,8 @@ export interface TalkGuard {
   llmDeadlineMs?: number;
   /** 기억 담은 먼저 말이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
   proactiveLlmFirstMs?: number;
+  /** 온보딩 고래 맞장구 LLM 이 첫 글자를 이 시간 안에 못 내면 고정 문장으로 말한다(기본 2.5초). 시험에서만 바꾼다. */
+  onboardingAckFirstMs?: number;
   /** 친구·메시지·일기. 없으면 말로 보내기·운전 끝 알림이 꺼진다. */
   social?: Social;
   /** 기어 P 를 이만큼(ms) 두면 운전이 끝난 것으로 본다(기본 60초). 시험에서만 바꾼다. */
@@ -218,7 +220,7 @@ export const isParked = (ctx: Ctx): boolean => ctx.gear === "P" && !(typeof ctx.
 /** 한 턴에서 할 일. text 가 있으면 그대로 말하고, llm 이 있으면 모델에게 시킨다. */
 interface Plan {
   text?: string;
-  llm?: { system: string; userText: string; maxTokens: number; /** 모델이 NONE 이라고 하면 대신 말할 문장 */ fallback?: string };
+  llm?: { system: string; userText: string; maxTokens: number; /** 모델이 NONE 이라고 하면 대신 말할 문장 */ fallback?: string; /** fallback 이 있을 때 첫 글자를 기다리는 시간(기본 proactiveLlmFirstMs) */ firstMs?: number };
   /** 기억 추출에 쓸 사용자 말(없으면 추출 안 함) */
   extractFrom?: string[];
   driving: boolean;
@@ -226,6 +228,8 @@ interface Plan {
   trusted?: boolean;
   /** "whale" 이면 고래 목소리로 읽고, 헤이리가 한 말(최근 대화)로 치지 않는다. */
   voice?: "whale";
+  /** 온보딩 고정 대사: 최근 대화 기록에 남기지 않는다. */
+  onboarding?: true;
   speech: SpeechStyle;
   userText: string;
 }
@@ -284,6 +288,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   const fillerAfter = opts?.fillerAfterMs ?? FILLER_AFTER_MS;
   const llmDeadline = opts?.llmDeadlineMs ?? LLM_DEADLINE_MS;
   const proactiveFirstMs = opts?.proactiveLlmFirstMs ?? PROACTIVE_LLM_FIRST_MS;
+  const ackFirstMs = opts?.onboardingAckFirstMs ?? ACK_LLM_FIRST_MS;
   const fetchImpl = opts?.fetchImpl ?? fetch;
   const send = (ws: Ws, f: ServerFrame) => void ws.send(JSON.stringify(f));
   const fail = (ws: Ws, code: ErrorCode, turnId?: string) => send(ws, turnId === undefined ? { type: "error", code } : { type: "error", code, turnId });
@@ -477,7 +482,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       let src: AsyncIterable<string>;
       if (plan.llm) {
         let s: AsyncIterable<string> = llmText(plan.llm.system, plan.llm.userText, plan.llm.maxTokens, llmAbort.signal, meta);
-        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback, proactiveFirstMs, () => llmAbort.abort());
+        if (plan.llm.fallback !== undefined) s = noneGuard(s, plan.llm.fallback, plan.llm.firstMs ?? proactiveFirstMs, () => llmAbort.abort());
         src = s;
       } else {
         src = (async function* () {
@@ -518,7 +523,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
       observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model, proactive: Number(t.proactive === true) });
       observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, firstAudioMs: firstAudio, fillerMs, firstPieceMs, firstPieceChars, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
-      if (plan.voice !== "whale") c.recent.push({ u: plan.userText, a: full });
+      if (plan.voice !== "whale" && !plan.onboarding) c.recent.push({ u: plan.userText, a: full });
       if (c.recent.length > RECENT_TURNS) c.recent.shift();
       c.quietUntil = clock.now() + QUIET_AFTER_REPLY_MS;
       if (plan.extractFrom) void extractMemory(ws.data.installId, plan.extractFrom);
@@ -728,27 +733,42 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
   hub.onFriend = speakFriend;
 
-  /** 온보딩 단계 하나를 말한다. 고래 단계는 고정 대사를 고래 목소리로, greeting 은 헤이리가 답을 녹여 LLM 으로 말한다. 주행 중에도 막지 않는다(D-48). */
-  function onboardingStep(ws: Ws, step: OnboardingStep): void {
+  /** 온보딩 턴 하나를 연다(진행 중인 말은 끊는다). */
+  function openOnboardingTurn(ws: Ws, step: string): Turn {
     const d = ws.data;
-    if (!store.talkAllowed(d.installId)) return fail(ws, "consent_required");
     const c = conn(d);
-    const s = store.getSettings(d.installId);
-    // 온보딩이 처음 만남(F2)을 대신한다: 헤이리가 어투·호칭을 다시 묻지 않는다.
-    const st = store.getTalkState(d.installId);
-    if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
     cancel(d);
     const id = `ob-${step}-${crypto.randomUUID().slice(0, 8)}`;
     const t: Turn = { id, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
     d.turn = t;
+    return t;
+  }
+
+  /**
+   * 온보딩 단계 하나를 말한다. 고래 단계는 고정 대사를 고래 목소리로, 헤이리 고정 단계(memory·dress·qr·done)는 고정 대사를 헤이리 목소리로,
+   * greeting 은 헤이리가 답을 녹여 LLM 으로 말한다. 주행 중에도 막지 않는다(D-48).
+   * 동의 게이트: CONSENT_FREE_STEPS(고정 대사뿐, 사용자 데이터가 어디로도 가지 않는다)만 record·external_ai 동의 없이 말한다. q1~q3·greeting 은 동의가 있어야 한다.
+   * 동의 전에는 저장소에 아무것도 쓰지 않는다(meetStage·greeting 기록은 동의 뒤에만).
+   */
+  function onboardingStep(ws: Ws, step: OnboardingStep): void {
+    const d = ws.data;
+    const consented = store.talkAllowed(d.installId);
+    if (!consented && !CONSENT_FREE_STEPS[step]) return fail(ws, "consent_required");
+    const c = conn(d);
+    const s = store.getSettings(d.installId);
+    // 온보딩이 처음 만남(F2)을 대신한다: 헤이리가 어투·호칭을 다시 묻지 않는다.
+    if (consented && store.getTalkState(d.installId).meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
+    const t = openOnboardingTurn(ws, step);
+    const id = t.id;
     const driving = !isParked(c.ctx);
     if (step !== "greeting") {
-      const text = WHALE_LINES[step];
-      ws.send(JSON.stringify({ type: "onboarding", step, id, text }));
-      void deliver(ws, t, { text, driving, speech: s.speech, userText: "", trusted: true, voice: "whale" });
+      const heyri = step === "memory" || step === "dress" || step === "qr" || step === "done";
+      const text = heyri ? HEYRI_LINES[step === "memory" && !store.memoryAllowed(d.installId) ? "memoryOff" : step][s.speech] : WHALE_LINES[step];
+      ws.send(JSON.stringify({ type: "onboarding", step, id, voice: heyri ? "heyri" : "whale", text }));
+      void deliver(ws, t, { text, driving, speech: s.speech, userText: "", trusted: true, onboarding: true, ...(heyri ? {} : { voice: "whale" as const }) });
       return;
     }
-    ws.send(JSON.stringify({ type: "onboarding", step, id }));
+    ws.send(JSON.stringify({ type: "onboarding", step, id, voice: "heyri" }));
     const a = c.onboarding ?? {};
     const fallback = withName(pick(L.onboardingGreetFallback, s.speech), a.name ?? s.nickname, s.speech);
     store.patchTalkState(d.installId, { lastGreetingDay: kstDay(clock.now()) });
@@ -759,28 +779,50 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     void deliver(ws, t, { llm: { system, userText: "(첫 인사를 한다)", maxTokens: PROACTIVE_MAX_TOKENS, fallback }, driving, speech: s.speech, userText: "" });
   }
 
-  /** 고래 질문에 말로 한 답. q1 → 호칭·표시 이름, q2·q3 → 운전자의 기억(기억 동의가 있을 때). 동승자가 한 말은 받지 않는다(D-38). */
-  function onboardingAnswer(ws: Ws, step: QuestionStep, text: string): void {
+  /**
+   * 고래 질문에 말로 한 답. q1 → 호칭·표시 이름, q2·q3 → 운전자의 기억(기억 동의가 있을 때). 동승자가 한 말은 받지 않는다(D-38).
+   * reply:true 면 받아들인 답엔 고래 맞장구(LLM, 느리면 고정 문장), 못 알아들은 답엔 skip 대사가 이어진다(다시 묻지 않고 넘어간다).
+   */
+  function onboardingAnswer(ws: Ws, step: QuestionStep, text: string, reply: boolean): void {
     const d = ws.data;
     if (!store.talkAllowed(d.installId)) return fail(ws, "consent_required");
     const c = conn(d);
     const a = (c.onboarding ??= {});
-    const ack = (ok: boolean, name?: string): void => void ws.send(JSON.stringify({ type: "onboarding.ack", step, ok, ...(name ? { name } : {}) }));
-    const refusal = checkInput(text, store.getSettings(d.installId).speech);
-    if (refusal) return ack(false);
+    const s = store.getSettings(d.installId);
+    const ack = (ok: boolean, name?: string): void => void ws.send(JSON.stringify({ type: "onboarding.ack", step, ok, ...(name ? { name } : {}), ...(reply && !ok ? { skipped: true } : {}) }));
+    const driving = !isParked(c.ctx);
+    const skip = (): void => {
+      ack(false);
+      if (!reply) return;
+      const t = openOnboardingTurn(ws, "skip");
+      const line = WHALE_LINES.skip;
+      ws.send(JSON.stringify({ type: "onboarding", step: "skip", id: t.id, voice: "whale", text: line }));
+      void deliver(ws, t, { text: line, driving, speech: s.speech, userText: "", trusted: true, voice: "whale", onboarding: true });
+    };
+    const accepted = (answer: string, name?: string | null): void => {
+      ack(true, name ?? undefined);
+      if (!reply) return;
+      const t = openOnboardingTurn(ws, "ack");
+      ws.send(JSON.stringify({ type: "onboarding", step: "ack", for: step, id: t.id, voice: "whale" }));
+      const fallback = ackFallback(step, name);
+      if (!cfg.apiKey) return void deliver(ws, t, { text: fallback, driving, speech: s.speech, userText: "", trusted: true, voice: "whale", onboarding: true });
+      void deliver(ws, t, { llm: { system: ackInstruction(step, answer), userText: answer, maxTokens: 40, fallback, firstMs: ackFirstMs }, driving, speech: s.speech, userText: "", voice: "whale", onboarding: true });
+    };
+    const refusal = checkInput(text, s.speech);
+    if (refusal) return skip();
     if (step === "q1") {
       const name = parseOnboardingName(text);
-      if (name === undefined) return ack(false);
+      if (name === undefined) return skip();
       a.name = name;
       if (name) setSettings(d.installId, { nickname: name, displayName: name });
-      return ack(true, name ?? undefined);
+      return accepted(name ?? text, name);
     }
     const clean = cleanOnboardingAnswer(text);
-    if (!clean) return ack(false);
+    if (!clean) return skip();
     if (step === "q2") a.trips = clean;
     else a.topics = clean;
     if (store.memoryAllowed(d.installId)) store.addMemory(d.installId, "fact", step === "q2" ? tripsMemory(clean) : topicsMemory(clean));
-    ack(true);
+    accepted(clean);
   }
 
   /** 운전 시작·끝, 도착 알림, 일기 재료를 ctx 에서 읽는다. 위치는 내비 목적지 이름만 쓴다. */
@@ -1022,7 +1064,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const onboarding = parseOnboardingFrame(data);
       if (onboarding) {
         if (!ws.data.hello) return fail(ws, "hello_required");
-        return onboarding.kind === "step" ? onboardingStep(ws, onboarding.step) : onboardingAnswer(ws, onboarding.step, onboarding.text);
+        return onboarding.kind === "step" ? onboardingStep(ws, onboarding.step) : onboardingAnswer(ws, onboarding.step, onboarding.text, onboarding.reply);
       }
       const p = parseClientFrame(data);
       if (!p.ok) return fail(ws, p.code);
