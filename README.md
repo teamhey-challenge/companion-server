@@ -92,6 +92,14 @@
 
 말로 전하기: "○○한테 … 전해 줘"(이름이 겹치면 되묻고 다음 답으로 보낸다), 방금 온 메시지(10분 안)에는 "고맙다고 전해 줘"처럼 이름 없이. 보낸 뒤 "○○한테 전했어!"로 확인한다.
 
+## 온보딩·가족 (D-48)
+
+`/v1/talk` 위의 온보딩 프레임(hello·동의 필요, 주행 중에도 막지 않는다): 앱→서버 `{"type":"onboarding","step":"whale_intro|q1|q2|q3|greeting"}`는 그 단계를 지금 말하라는 뜻이고, 서버는 `{"type":"onboarding","step","id","text"?}` 뒤에 `reply.start`·PCM·`reply.end`(turnId = id)를 보낸다. 고래 단계(`whale_intro`·`q1`~`q3`)는 고정 대사를 고래 목소리로, `greeting`은 헤이리 목소리로 q1~q3 답을 녹여 LLM이 쓴다(LLM 키가 없거나 실패하면 고정 인사). 답은 앱→서버 `{"type":"onboarding.answer","step":"q1|q2|q3","text":"<STT 문장>"}`, 응답 `{"type":"onboarding.ack","step","ok","name"?}`. `ok:false`(안전 필터·알아듣지 못함)면 다시 묻는다. q1은 `nickname`·`displayName`(settings 프레임 푸시), q2·q3는 운전자의 기억(기억 동의가 있을 때)이 된다. 온보딩을 하면 헤이리의 어투·호칭 첫 만남(F2)은 끝난 것으로 본다.
+
+고래 목소리: `ONBOARDING_VOICE_ID`(환경변수 또는 `~/.config/companion/server.env`). 없으면 헤이리 목소리로 대신하고 시작할 때 `tts.whale_voice_fallback`을 한 번 로그한다. 값은 로그·저장소에 남기지 않는다.
+
+가족(D-38·D-48): 운전자가 "우리 딸이야, 이름은 ○○"라고 소개하면 이름·관계만 운전자의 기억으로 남기고(기억 추출 지시), 소개받은 사람이 한 말은 기억하지 않는다. 헤이리는 기억에 가족 이름이 있으면 여럿이 탔을 때 이름을 번갈아 부른다(페르소나). 알림은 친구 메시지와 운전 끝 일기(`trip_done`·`diary_ready`)에서만 나간다.
+
 운전 끝: ctx `gear:"P"` + `driverDoorOpen`(또는 `doorOpen`)이 새로 열림, 못 보면 P 60초. 이때 폰에 `trip_done`을 보내고 그날 일기를 LLM(헤이리 목소리, 3~5문장, 목적지 이름만·좌표 없음)으로 쓰면 `diary_ready`. 도착 알림은 ctx `arrived:true`(없으면 운전 끝)에서 `shareArrival`을 켠 친구에게만, 장소는 ctx `destinationName`(좌표처럼 보이면 버림).
 
 ## 점검

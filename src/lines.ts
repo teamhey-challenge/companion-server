@@ -73,6 +73,7 @@ export const L = {
   messageBad: pair("그건 전하기 어려워, 짧게 다시 말해 줄래?", "그건 전하기 어려워요, 짧게 다시 말씀해 주실래요?"),
   messageNoReply: pair("방금 메시지 준 친구가 없어. 이름을 말해 줘!", "방금 메시지 준 친구가 없어요. 이름을 말씀해 주세요!"),
   messageAsk: pair("중에 누구한테 보낼까?", "중에 누구께 보낼까요?"),
+  onboardingGreetFallback: pair("반가워! 난 헤이리야. 오늘부터 같이 다니자!", "반가워요! 저는 헤이리예요. 오늘부터 같이 다녀요!"),
   // 어투·호칭 바꾸기(F11)
   speechBanmal: pair("알았어, 편하게 말할게!", "알았어, 편하게 말할게!"),
   speechJondaetmal: pair("네, 존댓말로 말씀드릴게요.", "네, 존댓말로 말씀드릴게요."),
