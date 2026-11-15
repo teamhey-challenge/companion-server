@@ -1,13 +1,24 @@
 # companion-server
 
-차량 캐릭터 AI 컴패니언 "헤이리"(앱 Hey, 팀 Team Hey. 저장소 이름 `companion-*`은 그대로)의 서버 저장소다. HEY 시절 `hey-relay@3939310`에서 재사용할 뼈대만 복사했다(원본 저장소는 그대로 보관).
+앱 이름 **Hey**(캐릭터 헤이리), 팀 **Team Hey**. 저장소 이름 `companion-*`은 그대로다.
 
-> 공모전 제출 묶음의 일부다. 앱 Hey(캐릭터 헤이리), 팀 Team Hey. 앱(APK)은 차량 앱·폰 앱 저장소의 `apk/`에 있다.
+차량 캐릭터 AI 컴패니언 "헤이리"의 **서버** 저장소다. 차량 앱·폰 앱의 대화(`/v1/talk` 웹소켓)·기억·친구 메시지·일기·TTS를 맡는다. 서버는 대화 텍스트를 받아 LLM을 부르고, 답을 글자와 TTS 오디오(PCM)로 돌려준다. 기본 LLM은 OmniRoute(OpenAI 호환) `chat-fast`다. 음성 인식(STT)은 차량의 Pleos 내장 서비스(온디바이스)가 맡아 서버는 마이크 오디오를 받지 않는다.
 
-- 실행: Bun + TypeScript. `bun src/index.ts`(설정은 "설정" 표, 비밀은 600 권한 파일 `~/.config/companion/server.env`).
-- 테스트 환경: `bun run check`(단위 시험 + tsc)는 외부 키 없이 돈다. 실제 LLM·TTS 호출은 키가 있는 환경에서만 `scripts/smoke.ts`로 확인한다. 운영 서버는 팀이 운영하는 `https://hey.lastmile.ltd/api`다.
+## 제출물과 주소
 
-음성 인식(STT)은 차량의 Pleos 내장 서비스가 맡아 서버는 마이크 오디오를 받지 않는다. 서버는 대화 텍스트를 받아 LLM을 부르고, 답을 글자와 TTS 오디오(PCM)로 돌려준다. 기본 LLM은 OmniRoute(OpenAI 호환) `chat-fast`다.
+- 운영 서버: https://hey.lastmile.ltd/api (`/healthz`는 인증 없이 `{"ok":true}`). APK는 차량 앱·폰 앱 저장소의 `apk/`(`TeamHey_Hey_release.apk`, `TeamHey_Hey-phone_release.apk`)와 https://hey.lastmile.ltd/download/latest.apk, https://hey.lastmile.ltd/download/phone/latest.apk 에 있다.
+- 심사자 에뮬레이터의 차 등록: 서버는 `X-Provision-Secret`이 맞는 기기만 등록한다. 등록 비밀은 파일로 기기에 넣으며, 팀이 요청 시 전달한다(저장소에는 값이 없다). 방법은 companion-car README에 있다.
+
+## 테스트 환경과 실행
+
+- 런타임 Bun 1.4.2(CI와 같은 버전) + TypeScript. 심사용 에뮬레이터는 Pleos Connect `pleos_connect_v2_1`이다.
+- 실행: `bun install`, `bun src/index.ts`(설정은 아래 "설정" 표, 비밀은 권한 600 파일로만 읽는다).
+- 시험: `bun run check`(단위 시험 + tsc)는 외부 키 없이 돈다. 실제 LLM·TTS 호출은 키가 있는 환경에서만 `scripts/smoke.ts`로 확인한다.
+
+## 개인정보
+
+- 서버는 마이크 오디오를 받지 않고 인식된 문장 글자만 받는다. `ctx`의 좌표 키(`lat`·`lon`·`gps`·`location` 등)는 버리고, 일기에는 목적지 이름만 쓰며 좌표를 저장하지 않는다. 구글 로그인은 `sub`만 저장한다.
+- 기억·녹음 동의를 철회하면 그 계정의 일기·친구 메시지를 바로 지운다.
 
 ## 남아 있는 부품
 
@@ -58,7 +69,7 @@
 | `LLM_PROVIDER` | `openai-compatible` | `anthropic` · `openai` · `gemini` · `openai-compatible` |
 | `LLM_MODEL` | `chat-fast` | OmniRoute에서는 claude-haiku-5.5 → haiku-4.5 → deepseek 순으로 대체 |
 | `LLM_BASE_URL` | 없음 | openai-compatible 전용, 예: `http://127.0.0.1:20128/v1` |
-| `LLM_API_KEY` | 없음 | 키는 `~/.config/companion/server.env`(600 권한)에서만 읽는다. 예시는 `server.env.example` |
+| `LLM_API_KEY` | 없음 | 키는 권한 600 비밀 파일(`server.env`)에서만 읽는다. 예시는 `server.env.example` |
 | `COMPANION_PROVISION_SECRET` | 없음(필수) | 차량 등록에 요구하는 비밀(`X-Provision-Secret`). 값이 없으면 서버가 시작하지 않는다(fail-closed). 환경변수 또는 600 권한 비밀 파일에서 읽는다. 앱·웹 소스에 넣지 않는다 |
 | `BREEZE_API_KEY` | 없음 | BreezeBlue 키(600 파일에서만). 없으면 TTS 없이 `audio:"none"` |
 | `COMPANION_TTS_PROVIDER` | `breeze` | `breeze` · `fake`(시험·CI용 가짜 PCM) · `off` |
@@ -102,7 +113,7 @@
 
 `/v1/talk` 위의 온보딩 프레임(hello·동의 필요, 주행 중에도 막지 않는다): 앱→서버 `{"type":"onboarding","step":"whale_intro|q1|q2|q3|greeting"}`는 그 단계를 지금 말하라는 뜻이고, 서버는 `{"type":"onboarding","step","id","text"?}` 뒤에 `reply.start`·PCM·`reply.end`(turnId = id)를 보낸다. 고래 단계(`whale_intro`·`q1`~`q3`)는 고정 대사를 고래 목소리로, `greeting`은 헤이리 목소리로 q1~q3 답을 녹여 LLM이 쓴다(LLM 키가 없거나 실패하면 고정 인사). 답은 앱→서버 `{"type":"onboarding.answer","step":"q1|q2|q3","text":"<STT 문장>"}`, 응답 `{"type":"onboarding.ack","step","ok","name"?}`. `ok:false`(안전 필터·알아듣지 못함)면 다시 묻는다. q1은 `nickname`(settings 프레임 푸시), q2·q3는 운전자의 기억(기억 동의가 있을 때)이 된다. 이름은 계정당 `nickname` 한 칸이고(1~10자, 숫자만 불가, 안전 필터), `displayName`은 응답에만 나오는 읽기 전용 별칭(= `nickname` ?? "친구")이다. 폰·차의 PATCH `displayName`/`nickname`은 모두 `nickname`에 쓰며 친구에게 보이는 이름도 같다. 온보딩을 하면 헤이리의 어투·호칭 첫 만남(F2)은 끝난 것으로 본다.
 
-고래 목소리: `ONBOARDING_VOICE_ID`(환경변수 또는 `~/.config/companion/server.env`). 없으면 헤이리 목소리로 대신하고 시작할 때 `tts.whale_voice_fallback`을 한 번 로그한다. 값은 로그·저장소에 남기지 않는다.
+고래 목소리: `ONBOARDING_VOICE_ID`(환경변수 또는 비밀 파일 `server.env`). 없으면 헤이리 목소리로 대신하고 시작할 때 `tts.whale_voice_fallback`을 한 번 로그한다. 값은 로그·저장소에 남기지 않는다.
 
 가족(D-38·D-48): 운전자가 "우리 딸이야, 이름은 ○○"라고 소개하면 이름·관계만 운전자의 기억으로 남기고(기억 추출 지시), 소개받은 사람이 한 말은 기억하지 않는다. 헤이리는 기억에 가족 이름이 있으면 여럿이 탔을 때 이름을 번갈아 부른다(페르소나). 알림은 친구 메시지와 운전 끝 일기(`trip_done`·`diary_ready`)에서만 나간다.
 
@@ -115,7 +126,7 @@ bun run check   # 단위 시험 + tsc
 bun run scripts/smoke.ts "오늘 비 와서 천천히 갈게"   # 실제 LLM 한 턴
 ```
 
-`shared/`는 `companion-shared` 서브모듈이다. 비밀값(API 키)은 저장소에 두지 않고 `~/.config/companion/`의 600 파일로만 읽는다.
+`shared/`는 `companion-shared` 서브모듈이다. 비밀값(API 키)은 저장소에 두지 않고 권한 600 파일로만 읽는다.
 
 ## 링크·라이선스
 
