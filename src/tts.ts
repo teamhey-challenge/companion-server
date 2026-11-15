@@ -15,6 +15,8 @@ export interface TtsConfig {
   provider: "breeze" | "fake" | "off";
   apiKey: string | undefined;
   voiceId: string;
+  /** 고래(온보딩 안내자)의 Breeze 목소리. 비밀 파일/환경변수 ONBOARDING_VOICE_ID 에서만 읽고, 없으면 헤이리 목소리로 대신한다(한 번 로그). 값은 로그에 남기지 않는다. */
+  onboardingVoiceId?: string | undefined;
   /** 목소리를 잃었을 때 복제를 다시 할 원본 샘플 경로(없으면 복구 시도 안 함) */
   sampleFile: string | undefined;
 }
@@ -31,6 +33,8 @@ export class TtsError extends Error {
 /** synth 의 보조 옵션. background 는 미리 만들어 두기 같은 배경 작업: 실제 턴이 쓸 자리를 남겨 둔다. */
 export interface SynthOpts {
   background?: boolean;
+  /** "whale" 이면 고래 목소리(없으면 헤이리 목소리). */
+  voice?: "whale";
 }
 /** 한 문장의 PCM 청크 스트림. 취소하면 signal 로 끊는다. */
 export interface TtsProvider {
@@ -48,7 +52,7 @@ export function loadTtsConfig(env: Record<string, string | undefined> = process.
   const apiKey = pick("BREEZE_API_KEY");
   const asked = (env.COMPANION_TTS_PROVIDER ?? "breeze").toLowerCase();
   const provider = asked === "fake" ? "fake" : asked === "off" || !apiKey ? "off" : "breeze";
-  return { provider, apiKey, voiceId: pick("BREEZE_VOICE_ID") ?? VOICE_ID, sampleFile: pick("COMPANION_VOICE_SAMPLE") };
+  return { provider, apiKey, voiceId: pick("BREEZE_VOICE_ID") ?? VOICE_ID, onboardingVoiceId: pick("ONBOARDING_VOICE_ID"), sampleFile: pick("COMPANION_VOICE_SAMPLE") };
 }
 
 /** 시험·CI 용: 문장 길이에 비례한 가짜 PCM 을 몇 조각으로 돌려준다. */
@@ -57,14 +61,17 @@ export class FakeTts implements TtsProvider {
   active = 0;
   maxActive = 0;
   warmed = 0;
+  /** 부른 목소리(시험에서 고래 목소리가 갔는지 본다). */
+  voices: (SynthOpts["voice"] | undefined)[] = [];
   constructor(private readonly delayMs = 0) {}
 
   warm(): void {
     this.warmed++;
   }
 
-  async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
+  async synth(text: string, signal: AbortSignal, opts?: SynthOpts): Promise<AsyncIterable<Uint8Array>> {
     this.calls.push(text);
+    this.voices.push(opts?.voice);
     this.active++;
     this.maxActive = Math.max(this.maxActive, this.active);
     const delay = this.delayMs;
@@ -96,8 +103,9 @@ export class BreezeTts implements TtsProvider {
     this.voiceId = cfg.voiceId;
   }
 
-  private async post(text: string, signal: AbortSignal): Promise<Response> {
-    return this.fetchImpl(`${BREEZE_BASE}/v1/text-to-speech/${this.voiceId}/stream?output_format=pcm`, {
+  private async post(text: string, signal: AbortSignal, voice?: "whale"): Promise<Response> {
+    const voiceId = voice === "whale" && this.cfg.onboardingVoiceId ? this.cfg.onboardingVoiceId : this.voiceId;
+    return this.fetchImpl(`${BREEZE_BASE}/v1/text-to-speech/${voiceId}/stream?output_format=pcm`, {
       method: "POST",
       headers: { "xi-api-key": this.cfg.apiKey ?? "", "content-type": "application/json" },
       // hey_voice.json: instructions 는 넣지 않는다(원본과 유사도가 떨어짐)
@@ -120,12 +128,12 @@ export class BreezeTts implements TtsProvider {
       .finally(() => clearTimeout(timer));
   }
 
-  async synth(text: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
-    let res = await this.post(text, signal);
-    if (res.status === 404 && !this.recreated && this.cfg.sampleFile) {
+  async synth(text: string, signal: AbortSignal, opts?: SynthOpts): Promise<AsyncIterable<Uint8Array>> {
+    let res = await this.post(text, signal, opts?.voice);
+    if (res.status === 404 && !this.recreated && this.cfg.sampleFile && !(opts?.voice === "whale" && this.cfg.onboardingVoiceId)) {
       this.recreated = true;
       this.voiceId = await this.recreateVoice(signal);
-      res = await this.post(text, signal);
+      res = await this.post(text, signal, opts?.voice);
     }
     if (!res.ok || !res.body) {
       await res.body?.cancel().catch(() => undefined);
@@ -163,6 +171,7 @@ export class BreezeTts implements TtsProvider {
 export function makeTts(cfg: TtsConfig, observer: Observability, fetchImpl?: typeof fetch): PhraseCache | null {
   if (cfg.provider !== "fake" && cfg.provider !== "breeze") return null;
   const base = cfg.provider === "fake" ? new FakeTts() : new BreezeTts(cfg, observer, fetchImpl);
+  if (!cfg.onboardingVoiceId) observer.event("tts.whale_voice_fallback", { reason: "ONBOARDING_VOICE_ID unset, whale speaks with the heyri voice" });
   return new PhraseCache(new GatedTts(base, new Semaphore(), observer), cfg.voiceId);
 }
 
@@ -249,7 +258,7 @@ export class GatedTts implements TtsProvider {
     if (waited >= 1 && !opts?.background) this.observer.event("tts.queue_wait", { ms: waited });
     let body: AsyncIterable<Uint8Array>;
     try {
-      body = await this.inner.synth(text, signal);
+      body = await this.inner.synth(text, signal, opts?.voice ? { voice: opts.voice } : undefined);
     } catch (e) {
       this.sem.release();
       throw e;
@@ -285,8 +294,8 @@ export class PhraseCache implements TtsProvider {
     private readonly maxBytes = CACHE_MAX_BYTES,
   ) {}
 
-  private key(text: string): string {
-    return `${this.voiceKey}\u0000${text}`;
+  private key(text: string, voice?: "whale"): string {
+    return `${this.voiceKey}${voice ? `:${voice}` : ""}\u0000${text}`;
   }
 
   get size(): { entries: number; bytes: number } {
@@ -302,7 +311,7 @@ export class PhraseCache implements TtsProvider {
   }
 
   async synth(text: string, signal: AbortSignal, opts?: SynthOpts): Promise<AsyncIterable<Uint8Array>> {
-    const k = this.key(text);
+    const k = this.key(text, opts?.voice);
     const hit = this.map.get(k);
     if (hit) {
       this.map.delete(k);
@@ -472,6 +481,8 @@ export class AudioPipeline {
     private readonly tts: TtsProvider,
     private readonly signal: AbortSignal,
     private readonly sink: AudioSink,
+    /** 이 문장들을 읽을 목소리(기본: 헤이리). */
+    private readonly voice?: "whale",
   ) {
     this.done = this.drain();
     // 취소되면 대기 중인 drain 이 깨어나 끝나도록 한다.
@@ -504,7 +515,7 @@ export class AudioPipeline {
       return;
     }
     try {
-      for await (const c of await this.tts.synth(sentence, this.signal)) {
+      for await (const c of await this.tts.synth(sentence, this.signal, this.voice ? { voice: this.voice } : undefined)) {
         if (this.signal.aborted) break;
         job.chunks.push(c);
         notify();

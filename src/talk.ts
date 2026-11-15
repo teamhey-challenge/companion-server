@@ -19,6 +19,7 @@ import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError
 import { friendNotFound, sentToFriend } from "./lines";
 import { placeName, type Social } from "./social";
 import { matchFriends, parseSendIntent } from "./voice-intents";
+import { WHALE_LINES, cleanOnboardingAnswer, greetingInstruction, parseOnboardingFrame, parseOnboardingName, topicsMemory, tripsMemory, type OnboardingAnswers, type OnboardingStep, type QuestionStep } from "./onboarding";
 
 /** 기어 P 를 이만큼 두면(문 열림을 못 봐도) 운전이 끝난 것으로 본다. */
 const TRIP_HOLD_MS = 60_000;
@@ -109,6 +110,8 @@ interface Conn {
   /** 이번 운전에서 도착 알림을 이미 보냈다. */
   arrivedSent?: boolean;
   friendRetry?: TimerHandle;
+  /** 온보딩 답(이 연결 메모리에만 둔다). 첫 인사에 녹인다. */
+  onboarding?: OnboardingAnswers;
 }
 
 /** 업그레이드 때 붙이는 연결별 데이터. 티켓에서 온 installId·sessionId와 현재 턴 상태를 든다. */
@@ -221,6 +224,8 @@ interface Plan {
   driving: boolean;
   /** 이미 안전 검사를 거친 친구 메시지: 출력 필터를 다시 걸지 않는다. */
   trusted?: boolean;
+  /** "whale" 이면 고래 목소리로 읽고, 헤이리가 한 말(최근 대화)로 치지 않는다. */
+  voice?: "whale";
   speech: SpeechStyle;
   userText: string;
 }
@@ -370,7 +375,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
             ttsCause = e instanceof TtsError ? `http_${e.status}` : e.name === "TimeoutError" ? "timeout" : "network";
             observer.error("tts.failed", ttsCause);
           },
-        })
+        }, plan.voice)
       : null;
     if (!pipeline) start("none");
 
@@ -513,7 +518,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       emit({ type: "reply.end", turnId: t.id, text: full, firstTokenMs: first, totalMs });
       observer.event("talk.turn", { firstTokenMs: first ?? -1, totalMs, chars: full.length, model: meta.model ?? cfg.model, proactive: Number(t.proactive === true) });
       observer.turn({ llmFirstTokenMs: plan.llm ? first : null, firstTtsByteMs: firstByte, firstAudioMs: firstAudio, fillerMs, firstPieceMs, firstPieceChars, totalMs, model: plan.llm ? (meta.model ?? cfg.model) : "fixed" });
-      c.recent.push({ u: plan.userText, a: full });
+      if (plan.voice !== "whale") c.recent.push({ u: plan.userText, a: full });
       if (c.recent.length > RECENT_TURNS) c.recent.shift();
       c.quietUntil = clock.now() + QUIET_AFTER_REPLY_MS;
       if (plan.extractFrom) void extractMemory(ws.data.installId, plan.extractFrom);
@@ -592,7 +597,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
     // F2 첫 만남: 어투 → 호칭 → 수다 정도. 정차 중에만 답으로 받는다.
     const st = store.getTalkState(d.installId);
-    if (parked && st.meetStage >= 1 && st.meetStage <= 3) {
+    if (st.meetStage >= 1 && st.meetStage <= 3) {
       if (st.meetStage === 1) {
         const sp = answerSpeech(text) ?? s.speech;
         const next = setSettings(d.installId, { speech: sp });
@@ -722,6 +727,61 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   }
 
   hub.onFriend = speakFriend;
+
+  /** 온보딩 단계 하나를 말한다. 고래 단계는 고정 대사를 고래 목소리로, greeting 은 헤이리가 답을 녹여 LLM 으로 말한다. 주행 중에도 막지 않는다(D-48). */
+  function onboardingStep(ws: Ws, step: OnboardingStep): void {
+    const d = ws.data;
+    if (!store.talkAllowed(d.installId)) return fail(ws, "consent_required");
+    const c = conn(d);
+    const s = store.getSettings(d.installId);
+    // 온보딩이 처음 만남(F2)을 대신한다: 헤이리가 어투·호칭을 다시 묻지 않는다.
+    const st = store.getTalkState(d.installId);
+    if (st.meetStage < 4) store.patchTalkState(d.installId, { meetStage: 4 });
+    cancel(d);
+    const id = `ob-${step}-${crypto.randomUUID().slice(0, 8)}`;
+    const t: Turn = { id, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
+    d.turn = t;
+    const driving = !isParked(c.ctx);
+    if (step !== "greeting") {
+      const text = WHALE_LINES[step];
+      ws.send(JSON.stringify({ type: "onboarding", step, id, text }));
+      void deliver(ws, t, { text, driving, speech: s.speech, userText: "", trusted: true, voice: "whale" });
+      return;
+    }
+    ws.send(JSON.stringify({ type: "onboarding", step, id }));
+    const a = c.onboarding ?? {};
+    const fallback = withName(pick(L.onboardingGreetFallback, s.speech), a.name ?? s.nickname, s.speech);
+    store.patchTalkState(d.installId, { lastGreetingDay: kstDay(clock.now()) });
+    c.pro.greetChecked = true;
+    if (!cfg.apiKey) return void deliver(ws, t, fixed(fallback, s.speech, "", driving));
+    const memories = store.memoryAllowed(d.installId) ? recall(store.listMemory(d.installId, 40), "", 4) : [];
+    const system = buildSystem({ speech: s.speech, nickname: a.name ?? s.nickname, driving, ctx: c.ctx, memories, recent: [], proactive: { reason: "onboarding", instruction: greetingInstruction(a) } });
+    void deliver(ws, t, { llm: { system, userText: "(첫 인사를 한다)", maxTokens: PROACTIVE_MAX_TOKENS, fallback }, driving, speech: s.speech, userText: "" });
+  }
+
+  /** 고래 질문에 말로 한 답. q1 → 호칭·표시 이름, q2·q3 → 운전자의 기억(기억 동의가 있을 때). 동승자가 한 말은 받지 않는다(D-38). */
+  function onboardingAnswer(ws: Ws, step: QuestionStep, text: string): void {
+    const d = ws.data;
+    if (!store.talkAllowed(d.installId)) return fail(ws, "consent_required");
+    const c = conn(d);
+    const a = (c.onboarding ??= {});
+    const ack = (ok: boolean, name?: string): void => void ws.send(JSON.stringify({ type: "onboarding.ack", step, ok, ...(name ? { name } : {}) }));
+    const refusal = checkInput(text, store.getSettings(d.installId).speech);
+    if (refusal) return ack(false);
+    if (step === "q1") {
+      const name = parseOnboardingName(text);
+      if (name === undefined) return ack(false);
+      a.name = name;
+      if (name) setSettings(d.installId, { nickname: name, displayName: name });
+      return ack(true, name ?? undefined);
+    }
+    const clean = cleanOnboardingAnswer(text);
+    if (!clean) return ack(false);
+    if (step === "q2") a.trips = clean;
+    else a.topics = clean;
+    if (store.memoryAllowed(d.installId)) store.addMemory(d.installId, "fact", step === "q2" ? tripsMemory(clean) : topicsMemory(clean));
+    ack(true);
+  }
 
   /** 운전 시작·끝, 도착 알림, 일기 재료를 ctx 에서 읽는다. 위치는 내비 목적지 이름만 쓴다. */
   function trackTrip(ws: Ws, prev: Ctx, cur: Ctx, baseline: boolean): void {
@@ -958,6 +1018,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       if (typeof data !== "string") {
         observer.reject("talk.binary_rejected");
         return void ws.close(1003, "TEXT_ONLY");
+      }
+      const onboarding = parseOnboardingFrame(data);
+      if (onboarding) {
+        if (!ws.data.hello) return fail(ws, "hello_required");
+        return onboarding.kind === "step" ? onboardingStep(ws, onboarding.step) : onboardingAnswer(ws, onboarding.step, onboarding.text);
       }
       const p = parseClientFrame(data);
       if (!p.ok) return fail(ws, p.code);
