@@ -152,6 +152,17 @@ export class TalkHub {
     const msg = JSON.stringify({ type: "pairing", status } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
   }
+  /** 그 계정의 열린 차 소켓(인사를 마친 것)에 JSON 프레임 하나를 보낸다. 받은 소켓 수. */
+  pushCar(account: string, frame: object): number {
+    const msg = JSON.stringify(frame);
+    let n = 0;
+    for (const ws of this.socks.get(account) ?? []) {
+      if (ws.data.kind === "phone" || !ws.data.hello) continue;
+      ws.send(msg);
+      n++;
+    }
+    return n;
+  }
   /** talkHandlers 가 건다: 친구 메시지·도착을 이 소켓에서 말한다. */
   onFriend?: (ws: Ws, push: FriendPush) => void;
   /** 그 계정의 열린 차 소켓에 친구 메시지·도착(JSON 프레임 + 음성)을 보낸다. 받은 소켓 수. */

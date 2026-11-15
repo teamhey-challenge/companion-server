@@ -136,7 +136,9 @@ export class Social {
     const date = kstDate(now);
     const text = tripDoneLine(place);
     this.diary(account, "trip_done", text);
-    this.inbox.push(account, { type: "trip_done", id: crypto.randomUUID(), text, date, at: new Date(now).toISOString() });
+    const frame = { type: "trip_done", id: crypto.randomUUID(), text, date, at: new Date(now).toISOString() };
+    this.inbox.push(account, frame);
+    if (this.api.talkAllowed(account)) this.talkHub.pushCar(account, frame);
     void this.writeDiary(account, date).catch((e: Error) => this.observer.error("diary.failed", String(e.message).slice(0, 200)));
   }
 

@@ -388,6 +388,8 @@ describe("trip end and diary", () => {
     await stream.until(() => stream.of("trip_done").length === 1);
     expect(stream.of("trip_done")[0]!.text).toBe("오늘도 같이 달렸어. 수고했어!");
     expect(stream.of("trip_done")[0]).toMatchObject({ id: expect.any(String), at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
+    await carSock.until(() => carSock.of("trip_done").length === 1);
+    expect(carSock.of("trip_done")[0]).toEqual(stream.of("trip_done")[0]!);
     carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: true } });
     await Bun.sleep(150);
     expect(stream.of("trip_done")).toHaveLength(1);
