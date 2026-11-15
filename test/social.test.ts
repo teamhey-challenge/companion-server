@@ -6,7 +6,6 @@ import { FakeTts } from "../src/tts";
 import { parseSendIntent, matchFriends } from "../src/voice-intents";
 import { friendSaid, ga } from "../src/lines";
 
-const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 50 };
 const DIARY = "오늘은 회사에 같이 다녀왔어. 중간에 쉬면서 이야기도 했어. 같이 달려서 즐거웠어.";
 let diaryFail = false;
@@ -31,7 +30,7 @@ let diaryGate: Promise<void> | null = null;
 function boot(publicPerMin = 5, clock?: Clock): Env {
   const s = createServer({
     allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
-    guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
+    guard: { trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     publicPerMin, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(), ...(clock ? { clock } : {}),
     fetchImpl: (async (_u: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
@@ -79,7 +78,7 @@ class Sock {
 }
 
 async function car(e: Env, installId: string, displayName: string) {
-  const reg = await e.j<{ carToken: string }>(await fetch(`${e.base}/v1/cars/register`, { method: "POST", headers: { "x-provision-secret": SECRET, "content-type": "application/json" }, body: JSON.stringify({ installId }) }));
+  const reg = await e.j<{ carToken: string }>(await fetch(`${e.base}/v1/cars/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ installId }) }));
   const token = reg.carToken;
   for (const type of ["record", "external_ai"]) await e.call("POST", "/v1/consents", token, { type, version: "1", granted: true, channel: "car" });
   await e.call("PATCH", "/v1/settings", token, { displayName });

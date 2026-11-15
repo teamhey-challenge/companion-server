@@ -7,7 +7,6 @@ import { Observability } from "../src/observe";
 import { createServer, type RunningServer, type ServerOptions } from "../src/server";
 import type { TtsProvider } from "../src/tts";
 
-const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 10 };
 const sse = readFileSync(`${import.meta.dir}/fixtures/openai.sse`, "utf8");
 
@@ -33,7 +32,7 @@ function start(guard: Partial<ServerOptions["guard"]> = {}, dbPath = ":memory:",
     port: 0,
     hostname: "127.0.0.1",
     talk,
-    guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100, ...guard },
+    guard: { trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100, ...guard },
     observer: new Observability(() => {}),
     dbPath,
     tts,
@@ -48,7 +47,7 @@ const post = (url: string, headers: Record<string, string>, body: unknown = {}) 
 
 /** `grant: false` leaves the car without consents (the state before C1). */
 async function registerAndSession(base: string, installId = "install-0001", grant = true) {
-  const reg = await post(`${base}/v1/cars/register`, { "X-Provision-Secret": SECRET }, { installId });
+  const reg = await post(`${base}/v1/cars/register`, {}, { installId });
   const { carToken } = (await reg.json()) as { carToken: string };
   if (grant) for (const type of ["record", "external_ai"]) await post(`${base}/v1/consents`, { Authorization: `Bearer ${carToken}` }, { type, version: "1", granted: true, channel: "car" });
   const ses = await post(`${base}/v1/sessions`, { Authorization: `Bearer ${carToken}` });
@@ -92,14 +91,9 @@ class Client {
 const upgradeHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" };
 
 describe("register / sessions", () => {
-  test("wrong or missing provision secret -> 403", async () => {
-    const { base } = start();
-    expect((await post(`${base}/v1/cars/register`, { "X-Provision-Secret": "nope" }, { installId: "install-0001" })).status).toBe(403);
-    expect((await post(`${base}/v1/cars/register`, {}, { installId: "install-0001" })).status).toBe(403);
-  });
   test("bad installId -> 400", async () => {
     const { base } = start();
-    expect((await post(`${base}/v1/cars/register`, { "X-Provision-Secret": SECRET }, { installId: "x" })).status).toBe(400);
+    expect((await post(`${base}/v1/cars/register`, {}, { installId: "x" })).status).toBe(400);
   });
   test("sessions need a valid carToken", async () => {
     const { base } = start();
@@ -146,7 +140,7 @@ describe("ws upgrade", () => {
     const t = { now: 1_000_000 };
     const s = createServer({
       port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
-      guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
+      guard: { trustProxy: false, turnsPerMin: 20, turnsPerDay: 300, upgradesPerMin: 100, httpPerMin: 100 },
       clock: { now: () => t.now, setTimeout: () => ({ id: 0 }), clearTimeout: () => {} },
     });
     servers.push(s);
@@ -270,8 +264,8 @@ describe("healthz", () => {
 });
 
 describe("guard config", () => {
-  test("refuses to start without a provision secret unless explicitly allowed", () => {
-    expect(() => loadGuardConfig({}, {})).toThrow("COMPANION_PROVISION_SECRET");
-    expect(loadGuardConfig({ COMPANION_ALLOW_NO_AUTH: "1" }, {}).provisionSecret).toBeUndefined();
+  test("starts with no registration secret and reads the rate limits", () => {
+    expect(loadGuardConfig({}, {}).httpPerMin).toBe(30);
+    expect(loadGuardConfig({ COMPANION_HTTP_PER_MIN: "5" }, {}).httpPerMin).toBe(5);
   });
 });

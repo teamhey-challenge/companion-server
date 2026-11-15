@@ -1,14 +1,11 @@
 // 사용: bun run scripts/smoke.ts ["문장"] [횟수]
 //   SMOKE_BASE=https://hey.lastmile.ltd/api 이면 공개 서버에, 없으면 서버를 새로 띄워 시험한다.
-//   등록 비밀은 환경변수 COMPANION_PROVISION_SECRET 또는 ~/.config/companion/server.env 에서 읽는다(값은 출력하지 않는다).
 // 한 턴마다 turn.end → 첫 reply.delta, 첫 오디오 바이트, reply.end 까지의 ms 와 오디오 바이트 수를 출력한다.
-import { PROVISION_HEADER, type RegisterResponse, type SessionResponse } from "../shared/packages/protocol/src/index";
-import { loadSecrets } from "../src/llm/secrets";
+import { type RegisterResponse, type SessionResponse } from "../shared/packages/protocol/src/index";
 import { SentenceSplitter } from "../src/tts";
 
 const text = process.argv[2] ?? "오늘 비 와서 천천히 갈게";
 const turns = Number(process.argv[3] ?? 1);
-const provision = process.env.COMPANION_PROVISION_SECRET ?? loadSecrets().COMPANION_PROVISION_SECRET ?? "";
 
 let proc: Bun.Subprocess | undefined;
 const base: string = process.env.SMOKE_BASE ?? (await startLocal());
@@ -25,7 +22,7 @@ async function startLocal(): Promise<string> {
 }
 
 const installId = process.env.SMOKE_INSTALL_ID ?? `smoke-${crypto.randomUUID().slice(0, 12)}`;
-const reg = await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { [PROVISION_HEADER]: provision, "content-type": "application/json" }, body: JSON.stringify({ installId }) });
+const reg = await fetch(`${base}/v1/cars/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ installId }) });
 if (!reg.ok) throw new Error(`register ${reg.status}`);
 const { carToken } = (await reg.json()) as RegisterResponse;
 // 동의 없이는 답하지 않는다(consent_required): 시험 차에 필요한 동의를 준다. memory 는 주지 않아 기억 추출 호출이 안 생긴다.

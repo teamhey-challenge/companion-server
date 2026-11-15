@@ -8,7 +8,6 @@ import { parseForget, parseSpeechChange, answerNickname, answerChat } from "../s
 import { SentenceSplitter } from "../src/tts";
 import { SentenceCap } from "../src/sentence-cap";
 
-const SECRET = "provision-for-tests";
 const talk = { providerName: "openai-compatible", model: "chat-fast", apiKey: "k", baseUrl: "http://llm.invalid/v1", maxTokens: 50 };
 
 let servers: RunningServer[] = [];
@@ -27,7 +26,7 @@ interface Llm { replies: string[]; extraction: string; calls: { system: string; 
 function boot(llm: Llm, tts = false, clock?: Clock, extra: { llmDeadlineMs?: number; stall?: boolean; stallAfter?: string; proactiveLlmFirstMs?: number } = {}) {
   const s = createServer({
     allowNonGoogleClaim: true, allowPhoneOnly: true, port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
-    guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
+    guard: { trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
     arrivalDelayMs: 30,
     clock,
     llmDeadlineMs: extra.llmDeadlineMs,
@@ -83,7 +82,7 @@ class Car {
     };
   }
   static async connect(b: { base: string; port: number | undefined }, installId = "install-0001") {
-    const reg = await fetch(`${b.base}/v1/cars/register`, { method: "POST", headers: { "x-provision-secret": SECRET, "content-type": "application/json" }, body: JSON.stringify({ installId }) });
+    const reg = await fetch(`${b.base}/v1/cars/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ installId }) });
     const { carToken } = (await reg.json()) as { carToken: string };
     const ses = await fetch(`${b.base}/v1/sessions`, { method: "POST", headers: { authorization: `Bearer ${carToken}` } });
     const { wsTicket } = (await ses.json()) as { wsTicket: string };

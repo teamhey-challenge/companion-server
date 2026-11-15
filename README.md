@@ -7,7 +7,6 @@
 ## 제출물과 주소
 
 - 운영 서버: https://hey.lastmile.ltd/api (`/healthz`는 인증 없이 `{"ok":true}`). APK는 차량 앱·폰 앱 저장소의 `apk/`(`TeamHey_Hey_release.apk`, `TeamHey_Hey-phone_release.apk`)와 https://hey.lastmile.ltd/download/latest.apk, https://hey.lastmile.ltd/download/phone/latest.apk 에 있다.
-- 심사자 에뮬레이터의 차 등록: 서버는 `X-Provision-Secret`이 맞는 기기만 등록한다. 등록 비밀은 파일로 기기에 넣으며, 팀이 요청 시 전달한다(저장소에는 값이 없다). 방법은 companion-car README에 있다.
 
 ## 테스트 환경과 실행
 
@@ -39,7 +38,7 @@
 
 프레임 정의와 검증기는 `shared/packages/protocol`(v0.2.0~)이 정본이다. 고정 공유 토큰은 없다.
 
-1. `POST /v1/cars/register` — 헤더 `X-Provision-Secret`, 본문 `{"installId":"8~64자"}` → `{"carToken"}`. 틀리면 403. 같은 installId로 다시 하면 토큰이 바뀐다(이전 것은 무효).
+1. `POST /v1/cars/register` — 본문 `{"installId":"8~64자"}` → `{"carToken"}`. 비밀 없이 열려 있고 IP별 분당 한도만 있다(넘으면 429). 같은 installId로 다시 하면 토큰이 바뀐다(이전 것은 무효).
 2. `POST /v1/sessions` — `Authorization: Bearer <carToken>` → `{"sessionId","wsTicket","expiresInSec":60}`. 없거나 틀리면 401.
 3. `WS /v1/talk?ticket=<wsTicket>` — 티켓은 한 번만, 60초 안에 쓴다. 없거나 틀리거나 이미 쓴 티켓은 업그레이드 전에 401.
 
@@ -70,7 +69,6 @@
 | `LLM_MODEL` | `chat-fast` | OmniRoute에서는 claude-haiku-5.5 → haiku-4.5 → deepseek 순으로 대체 |
 | `LLM_BASE_URL` | 없음 | openai-compatible 전용, 예: `http://127.0.0.1:20128/v1` |
 | `LLM_API_KEY` | 없음 | 키는 권한 600 비밀 파일(`server.env`)에서만 읽는다. 예시는 `server.env.example` |
-| `COMPANION_PROVISION_SECRET` | 없음(필수) | 차량 등록에 요구하는 비밀(`X-Provision-Secret`). 값이 없으면 서버가 시작하지 않는다(fail-closed). 환경변수 또는 600 권한 비밀 파일에서 읽는다. 앱·웹 소스에 넣지 않는다 |
 | `BREEZE_API_KEY` | 없음 | BreezeBlue 키(600 파일에서만). 없으면 TTS 없이 `audio:"none"` |
 | `COMPANION_TTS_PROVIDER` | `breeze` | `breeze` · `fake`(시험·CI용 가짜 PCM) · `off` |
 | `COMPANION_VOICE_SAMPLE` | 없음 | 목소리를 잃었을 때(404) 복제를 다시 만들 원본 mp3 경로 |
