@@ -13,7 +13,27 @@ const pair = (banmal: string, jondaetmal: string): Pair => ({ banmal, jondaetmal
 
 export const pick = (p: Pair, s: SpeechStyle): string => p[s];
 
-const hasBatchim = (ch: string): boolean => {
+/** 이름 뒤 주격 조사: 받침 있으면 "이가"(지은이가), 없으면 "가"(민수가). */
+export const ga = (name: string): string => `${name}${hasBatchim(name[name.length - 1] ?? "") ? "이" : ""}가`;
+
+/** 친구가 보낸 말을 읽어 주는 한 줄. */
+export const friendSaid = (name: string, text: string, s: SpeechStyle): string =>
+  s === "jondaetmal" ? `${name}님이 그러는데요, ${text}` : `${ga(name)} 그러는데, ${text}`;
+
+/** 친구가 도착을 알렸을 때(장소 이름만, 좌표 없음). */
+export const friendArrivedLine = (name: string, place: string | null, s: SpeechStyle): string =>
+  s === "jondaetmal"
+    ? place ? `${name}님이 ${place}에 도착했대요!` : `${name}님이 도착했대요!`
+    : place ? `${ga(name)} ${place}에 도착했대!` : `${ga(name)} 도착했대!`;
+
+export const sentToFriend = (name: string, s: SpeechStyle): string => (s === "jondaetmal" ? `${name}님께 전했어요.` : `${name}한테 전했어!`);
+export const friendNotFound = (name: string, s: SpeechStyle): string =>
+  s === "jondaetmal" ? `${name}님이라는 친구는 못 찾았어요.` : `${name}라는 친구는 못 찾았어.`;
+
+/** 운전이 끝났을 때 폰으로 보내는 한 줄(브랜드 톤, 장소 이름만). */
+export const tripDoneLine = (place: string | null): string => (place ? `오늘도 같이 달렸어. ${place} 도착 축하해!` : "오늘도 같이 달렸어. 수고했어!");
+
+export const hasBatchim = (ch: string): boolean => {
   const c = ch.charCodeAt(0);
   return c >= 0xac00 && c <= 0xd7a3 && (c - 0xac00) % 28 !== 0;
 };
@@ -49,6 +69,10 @@ export const L = {
   longTripIce: pair("멀리 가니까 언젠가 주유해야겠네~", "멀리 가니까 언젠가 주유해야겠네요~"),
   longTripLpg: pair("멀리 가니까 언젠가 충전소 들러야겠네~", "멀리 가니까 언젠가 충전소 들러야겠네요~"),
   chargingTalk: pair("충전하는 동안 수수께끼 하나 낼까? 나 잘 내!", "충전하는 동안 수수께끼 하나 낼까요? 저 잘 내요!"),
+  messageBlocked: pair("그 말은 친구한테 전하기 좀 그래. 다른 말로 해 볼래?", "그 말은 전하기 곤란해요. 다른 말로 해 보실래요?"),
+  messageBad: pair("그건 전하기 어려워, 짧게 다시 말해 줄래?", "그건 전하기 어려워요, 짧게 다시 말씀해 주실래요?"),
+  messageNoReply: pair("방금 메시지 준 친구가 없어. 이름을 말해 줘!", "방금 메시지 준 친구가 없어요. 이름을 말씀해 주세요!"),
+  messageAsk: pair("중에 누구한테 보낼까?", "중에 누구께 보낼까요?"),
   // 어투·호칭 바꾸기(F11)
   speechBanmal: pair("알았어, 편하게 말할게!", "알았어, 편하게 말할게!"),
   speechJondaetmal: pair("네, 존댓말로 말씀드릴게요.", "네, 존댓말로 말씀드릴게요."),

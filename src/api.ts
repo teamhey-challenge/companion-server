@@ -11,9 +11,11 @@ import {
   type PairingStatus,
 } from "../shared/packages/protocol/src/index";
 import type { ApiStore, Principal, ServerSettings, ServerSettingsPatch } from "./api-store";
-import { LOOK_MAX, characterFor } from "./api-store";
+import { CHECKIN_TIME_RE, LOOK_MAX, MAX_DISPLAY_NAME_CHARS, characterFor } from "./api-store";
 import { bearer } from "./auth";
-import type { CarStore } from "./store";
+import type { Social } from "./social";
+import { INVITE_CODE_RE, MAX_MESSAGE_CHARS } from "./social-store";
+import type { CarStore, TicketBook } from "./store";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const noContent = () => new Response(null, { status: 204 });
@@ -24,11 +26,17 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_VEHICLE_EVENTS = 50;
 const MAX_MEMORY_PAGE = 100;
 const DEFAULT_MEMORY_PAGE = 50;
-const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname", "bodyColor", "hat", "neck"] as const;
+const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname", "bodyColor", "hat", "neck", "displayName", "checkinTime"] as const;
+/** 폰 토큰이 바꿀 수 있는 설정(공유 규칙의 speech 에 더해). */
+const PHONE_KEYS: readonly string[] = [...PHONE_SETTINGS_KEYS, "displayName", "checkinTime"];
 
 export interface ApiDeps {
   api: ApiStore;
   cars: CarStore;
+  social: Social;
+  tickets: TicketBook;
+  /** 폰 가입·초대 링크 주소의 앞부분(끝 슬래시 없음). */
+  passengerWebUrl: string;
   /** 설정이 바뀌면 그 차의 열린 소켓에 settings 프레임을 보낸다. */
   pushSettings?: (installId: string, settings: ServerSettings) => void;
   /** 폰·차가 연결을 해제하면 그 차의 열린 소켓에 pairing(none) 프레임을 보낸다. */
@@ -85,6 +93,17 @@ function parsePatch(body: unknown): ServerSettingsPatch | null {
       patch[k] = t ? t : null;
       continue;
     }
+    if (k === "displayName") {
+      const t = typeof v === "string" ? v.trim() : "";
+      if (!t || [...t].length > MAX_DISPLAY_NAME_CHARS) return null;
+      patch[k] = t;
+      continue;
+    }
+    if (k === "checkinTime") {
+      if (v !== null && !(typeof v === "string" && CHECKIN_TIME_RE.test(v))) return null;
+      patch[k] = v;
+      continue;
+    }
     patch[k] = v;
   }
   return Object.keys(patch).length > 0 ? (patch as ServerSettingsPatch) : null;
@@ -96,6 +115,13 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   const m = req.method;
 
   // ---- 토큰 없는 공개 경로(폰 연결 전) ----
+  if (path === "/v1/phones/register" && m === "POST") {
+    if (d.throttled(ip, "phreg", d.publicPerMin)) return json({ error: "rate_limited" }, 429);
+    const b = await readJson(req);
+    const name = isObj(b) && typeof b.displayName === "string" ? b.displayName.trim() : "";
+    if (!name || [...name].length > MAX_DISPLAY_NAME_CHARS) return bad();
+    return json(d.api.registerPhoneAccount(name));
+  }
   const pub = /^\/v1\/pairings\/([^/]+)(\/claim)?$/.exec(path);
   if (pub && pub[1] !== "current") {
     const code = pub[1]!;
@@ -115,7 +141,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     return json({ phoneToken: r.phoneToken, character: r.character });
   }
 
-  const known = /^\/v1\/(consents|pairings|memory|settings|vehicle-events)(\/|$)/.test(path);
+  const known = /^\/v1\/(consents|pairings|memory|settings|vehicle-events|friends|messages|diary|phone-sessions)(\/|$)/.test(path);
   if (!known) return null;
 
   const who = authenticate(req, d);
@@ -125,6 +151,16 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   }
   const { installId } = who;
   const carOnly = (): Response | null => (who.kind === "car" ? null : json({ error: "forbidden" }, 403));
+
+  if (path === "/v1/phone-sessions" && m === "POST") {
+    if (who.kind !== "phone") return json({ error: "forbidden" }, 403);
+    if (d.throttled(ip, "phses", d.publicPerMin * 3)) return json({ error: "rate_limited" }, 429);
+    const t = d.tickets.issue(installId, "any", "phone");
+    return json({ sessionId: t.sessionId, wsTicket: t.wsTicket, expiresInSec: t.expiresInSec });
+  }
+
+  const socialRes = await handleSocial(req, url, path, m, installId, d);
+  if (socialRes) return socialRes;
 
   if (path === "/v1/consents") {
     if (m === "GET") return json({ consents: d.api.listConsents(installId) });
@@ -184,7 +220,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     if (m !== "PATCH") return null;
     const patch = parsePatch(await readJson(req));
     if (!patch) return bad();
-    if (who.kind === "phone" && Object.keys(patch).some((k) => !(PHONE_SETTINGS_KEYS as readonly string[]).includes(k))) {
+    if (who.kind === "phone" && Object.keys(patch).some((k) => !PHONE_KEYS.includes(k))) {
       return json({ error: "forbidden" }, 403);
     }
     const next = d.api.patchSettings(installId, patch);
@@ -206,6 +242,65 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     }
     for (const e of events) d.api.recordVehicleEvent(installId, e.ctx, e.at);
     return new Response(null, { status: 202 });
+  }
+  return null;
+}
+
+const todayKst = (): string => new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 10);
+
+/** 친구·초대·메시지·신고·일기 경로. 해당 없으면 null. 모든 조회는 토큰이 가리키는 계정(installId) 하나로만 좁힌다. */
+async function handleSocial(req: Request, url: URL, path: string, m: string, me: string, d: ApiDeps): Promise<Response | null> {
+  const s = d.social;
+
+  if (path === "/v1/friends/invites" && m === "POST") {
+    const inv = s.store.createInvite(me);
+    return json({ code: inv.code, url: `${d.passengerWebUrl}/f/${inv.code}`, expiresAt: inv.expiresAt });
+  }
+  const accept = /^\/v1\/friends\/invites\/([^/]+)\/accept$/.exec(path);
+  if (accept && m === "POST") {
+    const code = accept[1]!.toUpperCase();
+    if (!INVITE_CODE_RE.test(code)) return json({ error: "unknown" }, 404);
+    const r = s.store.acceptInvite(code, me);
+    if (!r.ok) return json({ error: r.reason }, r.reason === "unknown" ? 404 : r.reason === "expired" ? 410 : r.reason === "self" ? 400 : 409);
+    return json({ friend: r.friend });
+  }
+  if (path === "/v1/friends" && m === "GET") return json(s.store.listFriends(me));
+  const friend = /^\/v1\/friends\/([^/]+)$/.exec(path);
+  if (friend) {
+    const id = decodeURIComponent(friend[1]!);
+    if (m === "DELETE") return s.store.removeFriend(me, id) ? noContent() : json({ error: "not_found" }, 404);
+    if (m === "PATCH") {
+      const b = await readJson(req);
+      if (!isObj(b) || typeof b.shareArrival !== "boolean") return bad();
+      const f = s.store.setShareArrival(me, id, b.shareArrival);
+      return f ? json(f) : json({ error: "not_found" }, 404);
+    }
+    return null;
+  }
+
+  if (path === "/v1/messages" && m === "POST") {
+    const b = await readJson(req);
+    if (!isObj(b) || typeof b.toFriendId !== "string" || typeof b.text !== "string") return bad();
+    const to = s.store.friendById(me, b.toFriendId);
+    if (!to) return json({ error: "not_found" }, 404);
+    const r = s.sendToAccount(me, to.account, b.text);
+    if (r.ok) return json({ id: r.message.id, at: new Date(r.message.at).toISOString() }, 201);
+    if (r.reason === "blocked") return json({ error: "message_blocked", code: "message_blocked" }, 422);
+    return r.reason === "bad_text" ? json({ error: "bad_text", max: MAX_MESSAGE_CHARS }, 400) : json({ error: "not_found" }, 404);
+  }
+  if (path === "/v1/messages" && m === "GET") {
+    const since = url.searchParams.get("since");
+    const sinceMs = since ? Date.parse(since) : null;
+    if (since && Number.isNaN(sinceMs)) return bad();
+    return json({ messages: s.store.listMessages(me, sinceMs) });
+  }
+  const report = /^\/v1\/messages\/([^/]+)\/report$/.exec(path);
+  if (report && m === "POST") return s.store.reportMessage(me, decodeURIComponent(report[1]!)) ? noContent() : json({ error: "not_found" }, 404);
+
+  if (path === "/v1/diary" && m === "GET") {
+    const date = url.searchParams.get("date") ?? todayKst();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return bad();
+    return json({ date, entries: s.store.diaryEntries(me, date), summary: s.store.diarySummary(me, date) });
   }
   return null;
 }

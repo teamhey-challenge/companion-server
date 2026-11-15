@@ -1,5 +1,5 @@
 import type { Ctx, MemoryItem, MemoryKind, Settings } from "../shared/packages/protocol/src/index";
-import { DEFAULT_SETTINGS, DEFAULT_TALK_STATE, normalizeMemoryText, type TalkState } from "./api-store";
+import { DEFAULT_SETTINGS, DEFAULT_TALK_STATE, normalizeMemoryText, type ServerSettings, type ServerSettingsPatch, type TalkState } from "./api-store";
 
 
 /**
@@ -7,8 +7,8 @@ import { DEFAULT_SETTINGS, DEFAULT_TALK_STATE, normalizeMemoryText, type TalkSta
  * 시험과 단독 실행에서는 InMemoryTalkStore를 쓴다.
  */
 export interface TalkStore {
-  getSettings(installId: string): Settings;
-  patchSettings(installId: string, patch: Partial<Settings>): Settings;
+  getSettings(installId: string): ServerSettings;
+  patchSettings(installId: string, patch: ServerSettingsPatch): ServerSettings;
   /** 기억 동의가 있고 settings.memoryEnabled 가 켜져 있을 때만 true. 쓰기와 떠올리기 모두 이 값을 따른다. */
   memoryAllowed(installId: string): boolean;
   /** AC-4.9-05: `record` 와 `external_ai` 동의가 둘 다 허용일 때만 true. 아니면 LLM·TTS 로 아무것도 보내지 않는다. */
@@ -25,7 +25,7 @@ export interface TalkStore {
 
 /** 프로세스 메모리에만 두는 저장소. 재시작하면 사라진다. */
 export class InMemoryTalkStore implements TalkStore {
-  private readonly settings = new Map<string, Settings>();
+  private readonly settings = new Map<string, ServerSettings>();
   private readonly memory = new Map<string, MemoryItem[]>();
   private readonly state = new Map<string, TalkState>();
   /** 시험에서 동의 철회를 흉내 낸다. */
@@ -33,10 +33,10 @@ export class InMemoryTalkStore implements TalkStore {
   /** 시험에서 녹음·외부 AI 동의가 없는 차를 흉내 낸다. */
   talkConsent = true;
 
-  getSettings(id: string): Settings {
+  getSettings(id: string): ServerSettings {
     return { ...(this.settings.get(id) ?? DEFAULT_SETTINGS) };
   }
-  patchSettings(id: string, patch: Partial<Settings>): Settings {
+  patchSettings(id: string, patch: ServerSettingsPatch): ServerSettings {
     const next = { ...this.getSettings(id), ...patch };
     this.settings.set(id, next);
     return { ...next };

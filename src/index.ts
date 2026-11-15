@@ -16,7 +16,7 @@ if (guard.provisionSecret === undefined) observer.error("config.no_auth", "COMPA
 const dbPath = `${process.env.COMPANION_DATA_DIR || "./data"}/companion.sqlite`;
 const ttsCfg = loadTtsConfig();
 const tts = makeTts(ttsCfg, observer);
-const server = createServer({ port, hostname: process.env.HOST || undefined, talk: cfg, guard, observer, dbPath, tts });
+const server = createServer({ port, hostname: process.env.HOST || undefined, talk: cfg, guard, observer, dbPath, tts, passengerWebUrl: process.env.PASSENGER_WEB_URL || undefined });
 observer.event("server.start", { port: server.port ?? port, pid: process.pid, provider: cfg.providerName, model: cfg.model, tts: ttsCfg.provider });
 
 // 고정 문장은 메모리에만 둔다(D-10). 가장 자주 쓰는 10조각만 시작할 때 합성하고(배포마다 도는 호출 수를 아낀다), 나머지는 처음 말할 때 담는다.

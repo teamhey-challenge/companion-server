@@ -1,4 +1,5 @@
 import { parseClientFrame, MAX_TEXT_CHARS, type AudioSpec, type Ctx, type ErrorCode, type PairingStatus, type ServerFrame, type Settings, type SpeechStyle, type Trigger } from "../shared/packages/protocol/src/index";
+import type { ServerSettings, ServerSettingsPatch } from "./api-store";
 import type { GuardConfig } from "./auth";
 import { SystemClock, type Clock, type TimerHandle } from "./clock";
 import { answerChat, answerNickname, answerSpeech, bestMatch, parseExtraction, parseForget, parseNicknameRequest, parseSpeechChange, recall, snippet } from "./intents";
@@ -15,6 +16,16 @@ import { hedged } from "./llm/hedge";
 import { recentForProactive } from "./memory-lines";
 import { DRIVING_MAX_SENTENCES, PARKED_MAX_SENTENCES, SentenceCap, splitSentences } from "./sentence-cap";
 import { AudioPipeline, FIRST_PIECE_OPTS, PCM_FORMAT, SentenceSplitter, TtsError, type TtsProvider } from "./tts";
+import { friendNotFound, sentToFriend } from "./lines";
+import { placeName, type Social } from "./social";
+import { matchFriends, parseSendIntent } from "./voice-intents";
+
+/** 기어 P 를 이만큼 두면(문 열림을 못 봐도) 운전이 끝난 것으로 본다. */
+const TRIP_HOLD_MS = 60_000;
+/** 방금 받은 친구 메시지에 "고맙다고 전해 줘"로 답할 수 있는 시간. */
+const REPLY_WINDOW_MS = 10 * 60_000;
+const FRIEND_SPEAK_RETRY_MS = 500;
+const FRIEND_SPEAK_MAX_TRIES = 40;
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-haiku-4-5",
@@ -86,6 +97,18 @@ interface Conn {
   /** 마지막 답에 끼워 넣은 기억(그거 잊어줘의 "그거") */
   lastMemoryId?: string;
   quietUntil: number;
+  /** 이번 운전이 시작됐고 아직 끝(운전석 문 열림 또는 P 60초)을 못 봤다. */
+  tripActive?: boolean;
+  /** 기어 P 가 이어진 시작 시각(운전 중이면 null) */
+  pSince?: number | null;
+  /** 이번 운전에서 본 내비 목적지 이름(좌표 아님) */
+  tripPlace?: string | null;
+  tripHold?: TimerHandle;
+  /** 누구한테 보낼지 되물은 말(다음 턴에 이름을 받으면 보낸다). */
+  pendingSend?: { text: string; candidates: { name: string; account: string }[] };
+  /** 이번 운전에서 도착 알림을 이미 보냈다. */
+  arrivedSent?: boolean;
+  friendRetry?: TimerHandle;
 }
 
 /** 업그레이드 때 붙이는 연결별 데이터. 티켓에서 온 installId·sessionId와 현재 턴 상태를 든다. */
@@ -96,6 +119,11 @@ export interface WsData {
   hello: boolean;
   turn?: Turn;
   conn?: Conn;
+  /** 차 앱(기본) 또는 폰. 친구 메시지 음성은 차 소켓에만 보낸다. */
+  kind?: "car" | "phone";
+  closed?: boolean;
+  /** 폰 받은편지함 소켓(서버가 보내기만 한다). */
+  inbox?: boolean;
 }
 
 export type Ws = { send(s: string | Uint8Array): unknown; close(code?: number, reason?: string): unknown; data: WsData };
@@ -121,12 +149,31 @@ export class TalkHub {
     const msg = JSON.stringify({ type: "pairing", status } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
   }
+  /** talkHandlers 가 건다: 친구 메시지·도착을 이 소켓에서 말한다. */
+  onFriend?: (ws: Ws, push: FriendPush) => void;
+  /** 그 계정의 열린 차 소켓에 친구 메시지·도착(JSON 프레임 + 음성)을 보낸다. 받은 소켓 수. */
+  deliverFriend(account: string, push: FriendPush): number {
+    let n = 0;
+    for (const ws of this.socks.get(account) ?? []) {
+      if (ws.data.kind === "phone" || !ws.data.hello) continue;
+      this.onFriend?.(ws, push);
+      n++;
+    }
+    return n;
+  }
   /** talkHandlers 가 건다: 동의가 바뀔 때마다 그 차의 각 소켓에 부른다(withdrawn: 철회인가). */
   onConsent?: (ws: Ws, withdrawn: boolean) => void;
   /** 동의가 바뀌었다: 허용이면 첫 정차를 다시 보고, 철회면 진행 중인 것을 끊는다. */
   consentChanged(installId: string, withdrawn: boolean): void {
     for (const ws of this.socks.get(installId) ?? []) this.onConsent?.(ws, withdrawn);
   }
+}
+
+/** 친구 쪽에서 온 말. frame 은 JSON 으로 그대로 보내고(id 필수), line 을 헤이리 목소리로 읽는다. */
+export interface FriendPush {
+  frame: { type: string; id: string };
+  line: (speech: SpeechStyle) => string;
+  fromAccount: string;
 }
 
 export interface TalkGuard {
@@ -147,6 +194,10 @@ export interface TalkGuard {
   llmDeadlineMs?: number;
   /** 기억 담은 먼저 말이 첫 글자를 이 시간 안에 못 받으면 고정 문장으로 말한다(기본 3.5초). 시험에서만 바꾼다. */
   proactiveLlmFirstMs?: number;
+  /** 친구·메시지·일기. 없으면 말로 보내기·운전 끝 알림이 꺼진다. */
+  social?: Social;
+  /** 기어 P 를 이만큼(ms) 두면 운전이 끝난 것으로 본다(기본 60초). 시험에서만 바꾼다. */
+  tripHoldMs?: number;
 }
 
 /** 취소된 턴은 아무것도 더 보내지 않는다. */
@@ -168,6 +219,8 @@ interface Plan {
   /** 기억 추출에 쓸 사용자 말(없으면 추출 안 함) */
   extractFrom?: string[];
   driving: boolean;
+  /** 이미 안전 검사를 거친 친구 메시지: 출력 필터를 다시 걸지 않는다. */
+  trusted?: boolean;
   speech: SpeechStyle;
   userText: string;
 }
@@ -345,6 +398,10 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const feed = (pieces: string[]): boolean => {
       for (const p of pieces) {
         if (capped) break;
+        if (plan.trusted) {
+          say(p);
+          continue;
+        }
         // 출력 필터는 문장 단위로 먼저 걸러 내고, 살아남은 문장만 상한에 센다(걸러진 문장이 상한을 잡아먹지 않게).
         const v = checkOutput(p, plan.driving, plan.userText);
         if (v === "unsafe") return true;
@@ -475,7 +532,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
   const fixed = (text: string, speech: SpeechStyle, userText: string, driving: boolean): Plan => ({ text, driving, speech, userText });
 
-  function setSettings(installId: string, patch: Partial<Settings>): Settings {
+  function setSettings(installId: string, patch: ServerSettingsPatch): ServerSettings {
     const next = store.patchSettings(installId, patch);
     hub.pushSettings(installId, next);
     return next;
@@ -503,6 +560,36 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       return fixed(refusal.line, s.speech, text, driving);
     }
 
+    // 친구에게 말로 전하기: "민수한테 늦는다고 전해 줘", 방금 온 메시지에 "고맙다고 전해 줘".
+    const social = opts?.social;
+    if (social) {
+      const pending = c.pendingSend;
+      c.pendingSend = undefined;
+      const sendTo = (to: { name: string; account: string }, body: string): Plan => {
+        const r = social.sendToAccount(d.installId, to.account, body);
+        if (r.ok) return fixed(sentToFriend(to.name, s.speech), s.speech, text, driving);
+        return fixed(pick(r.reason === "blocked" ? L.messageBlocked : L.messageBad, s.speech), s.speech, text, driving);
+      };
+      if (pending) {
+        const hit = matchFriends(text, pending.candidates);
+        if (hit.length === 1) return sendTo(hit[0]!, pending.text);
+      }
+      const intent = parseSendIntent(text);
+      if (intent) {
+        const friends = social.store.friendAccounts(d.installId);
+        if (intent.name === null) {
+          const last = social.store.lastIncomingFrom(d.installId, clock.now() - REPLY_WINDOW_MS);
+          const to = friends.find((f) => f.account === last);
+          return to ? sendTo(to, intent.text) : fixed(pick(L.messageNoReply, s.speech), s.speech, text, driving);
+        }
+        const hits = matchFriends(intent.name, friends);
+        if (hits.length === 1) return sendTo(hits[0]!, intent.text);
+        if (hits.length === 0) return fixed(friendNotFound(intent.name, s.speech), s.speech, text, driving);
+        c.pendingSend = { text: intent.text, candidates: hits };
+        return fixed(`${hits.map((h) => h.name).join(", ")} ${pick(L.messageAsk, s.speech)}`, s.speech, text, driving);
+      }
+    }
+
     // F2 첫 만남: 어투 → 호칭 → 수다 정도. 정차 중에만 답으로 받는다.
     const st = store.getTalkState(d.installId);
     if (parked && st.meetStage >= 1 && st.meetStage <= 3) {
@@ -514,7 +601,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       }
       if (st.meetStage === 2) {
         const nick = answerNickname(text);
-        const next = setSettings(d.installId, { nickname: nick ?? null });
+        const next = setSettings(d.installId, { nickname: nick ?? null, ...(nick && !s.displayName ? { displayName: nick } : {}) });
         store.patchTalkState(d.installId, { meetStage: 3 });
         return fixed(withName(pick(L.askChat, next.speech), next.nickname, next.speech), next.speech, text, driving);
       }
@@ -546,7 +633,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     }
     const nickReq = parseNicknameRequest(text);
     if (nickReq) {
-      const next = setSettings(d.installId, { nickname: nickReq });
+      const next = setSettings(d.installId, { nickname: nickReq, ...(s.displayName ? {} : { displayName: nickReq }) });
       return fixed(nicknameSet(nickReq, next.speech), next.speech, text, driving);
     }
 
@@ -610,6 +697,86 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (c.arrival) clock.clearTimeout(c.arrival);
     c.arrival = undefined;
   };
+
+  /**
+   * 친구 메시지·도착: JSON 프레임을 바로 보내고, 소리는 지금 말하는 중이 아닐 때 헤이리 목소리로 읽는다(같은 TTS 길, turnId = 프레임 id).
+   * 주행 중에도 바로 읽는다(팀 방향). 말하는 중이면 잠깐 뒤 다시 시도한다.
+   */
+  function speakFriend(ws: Ws, push: FriendPush): void {
+    ws.send(JSON.stringify(push.frame));
+    const speakWhenFree = (tries: number) => {
+      const d = ws.data;
+      if (d.closed || !store.talkAllowed(d.installId)) return;
+      if (d.turn) {
+        if (tries < FRIEND_SPEAK_MAX_TRIES) clock.setTimeout(() => speakWhenFree(tries + 1), FRIEND_SPEAK_RETRY_MS);
+        return;
+      }
+      const c = conn(d);
+      const s = store.getSettings(d.installId);
+      const t: Turn = { id: push.frame.id, trigger: "listen_after_proactive", text: "", ctx: { ...c.ctx }, abort: new AbortController(), cancelled: false, running: true, proactive: true };
+      d.turn = t;
+      observer.event("talk.friend", { kind: push.frame.type });
+      void deliver(ws, t, { text: push.line(s.speech), driving: !isParked(c.ctx), speech: s.speech, userText: "", trusted: true });
+    };
+    speakWhenFree(0);
+  }
+
+  hub.onFriend = speakFriend;
+
+  /** 운전 시작·끝, 도착 알림, 일기 재료를 ctx 에서 읽는다. 위치는 내비 목적지 이름만 쓴다. */
+  function trackTrip(ws: Ws, prev: Ctx, cur: Ctx, baseline: boolean): void {
+    const social = opts?.social;
+    const d = ws.data;
+    if (!social || baseline || !store.talkAllowed(d.installId)) return;
+    const c = conn(d);
+    const now = clock.now();
+    const date = kstDay(now);
+    const moving = cur.gear === "D" || cur.gear === "R" || (typeof cur.speedKmh === "number" && cur.speedKmh > 0);
+    const place = placeName(cur.destinationName);
+    if (place) {
+      c.tripPlace = place;
+      social.store.addPlace(d.installId, date, place);
+    }
+    if (wiperOn(cur.wiper) && !wiperOn(prev.wiper)) social.note(d.installId, "rain");
+    if (cur.headlight === true && prev.headlight !== true && isNight(now)) social.note(d.installId, "night");
+    if (cur.charging === true && prev.charging !== true) social.charged(d.installId);
+    if (moving) {
+      if (c.tripHold) clock.clearTimeout(c.tripHold);
+      c.tripHold = undefined;
+      if (!c.tripActive) {
+        c.tripActive = true;
+        c.arrivedSent = false;
+        c.tripPlace = place;
+        social.tripStarted(d.installId);
+      }
+      return;
+    }
+    if (!c.tripActive) return;
+    if (cur.arrived === true && prev.arrived !== true && !c.arrivedSent) {
+      c.arrivedSent = true;
+      social.arrived(d.installId, c.tripPlace ?? null);
+    }
+    if (cur.gear !== "P") return;
+    const doorOpened = (cur.driverDoorOpen === true && prev.driverDoorOpen !== true) || (cur.doorOpen === true && prev.doorOpen !== true);
+    if (doorOpened) return void endTrip(ws);
+    // 문 열림을 못 봐도 P 를 60초 두면 끝난 것으로 본다.
+    if (!c.tripHold) c.tripHold = clock.setTimeout(() => {
+      c.tripHold = undefined;
+      if (c.ctx.gear === "P") endTrip(ws);
+    }, opts?.tripHoldMs ?? TRIP_HOLD_MS);
+  }
+
+  function endTrip(ws: Ws): void {
+    const c = conn(ws.data);
+    if (!c.tripActive || !opts?.social) return;
+    c.tripActive = false;
+    if (c.tripHold) clock.clearTimeout(c.tripHold);
+    c.tripHold = undefined;
+    const place = c.tripPlace ?? null;
+    if (!c.arrivedSent && place) opts.social.arrived(ws.data.installId, place);
+    c.arrivedSent = true;
+    opts.social.tripDone(ws.data.installId, place);
+  }
 
   const clearFirstStopRetry = (c: Conn) => {
     if (c.firstStopRetry) clock.clearTimeout(c.firstStopRetry);
@@ -705,6 +872,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     const pro = c.pro;
     const baseline = !c.seen && Object.keys(prev).length === 0;
     c.seen = true;
+    trackTrip(ws, prev, cur, baseline);
 
     const moving = cur.gear === "D" || cur.gear === "R" || (typeof cur.speedKmh === "number" && cur.speedKmh > 0);
     if (moving) {
@@ -778,9 +946,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     },
     close(ws: Ws) {
       hub.remove(ws);
+      ws.data.closed = true;
       if (ws.data.conn) {
         clearArrival(ws.data.conn);
         clearFirstStopRetry(ws.data.conn);
+        if (ws.data.conn.tripHold) clock.clearTimeout(ws.data.conn.tripHold);
       }
       cancel(ws.data);
     },
@@ -795,6 +965,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       const d = ws.data;
       if (f.type === "hello") {
         d.hello = true;
+        if (d.kind !== "phone") opts?.social?.replayUndelivered(d.installId);
         return;
       }
       if (!d.hello) return fail(ws, "hello_required");

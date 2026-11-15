@@ -33,10 +33,12 @@ const MAX_EVENTS_PER_CAR = 200;
 /** 꾸미기(D-41). Rive 계약(rive-rig.md): bodyColor 0 아쿠아·1 피치, hat 0 없음·1 비니(기본: 지금 보이는 모습)·2 버킷, neck 0 없음·1 스카프. bodyColor null = 테마를 따른다(라이트 0, 다크 1). */
 export interface Look { bodyColor: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1 }
 export const LOOK_MAX = { bodyColor: 1, hat: 2, neck: 1 } as const;
-export type ServerSettings = Settings & Look;
+export type ServerSettings = Settings & Look & { displayName: string | null; checkinTime: string | null };
 export type ServerSettingsPatch = Partial<ServerSettings>;
+export const MAX_DISPLAY_NAME_CHARS = 20;
+export const CHECKIN_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-export const DEFAULT_SETTINGS: ServerSettings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0 };
+export const DEFAULT_SETTINGS: ServerSettings = { proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: null, checkinTime: null };
 
 export type Principal = { kind: "car" | "phone"; installId: string };
 
@@ -73,6 +75,9 @@ export class ApiStore {
     if (!cols.includes("body_color")) db.run("ALTER TABLE settings ADD COLUMN body_color INTEGER");
     if (!cols.includes("hat")) db.run("ALTER TABLE settings ADD COLUMN hat INTEGER NOT NULL DEFAULT 1");
     if (!cols.includes("neck")) db.run("ALTER TABLE settings ADD COLUMN neck INTEGER NOT NULL DEFAULT 0");
+    if (!cols.includes("display_name")) db.run("ALTER TABLE settings ADD COLUMN display_name TEXT");
+    if (!cols.includes("checkin_time")) db.run("ALTER TABLE settings ADD COLUMN checkin_time TEXT");
+    db.run("CREATE TABLE IF NOT EXISTS phone_accounts (account_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL)");
     db.run(`CREATE TABLE IF NOT EXISTS vehicle_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, at TEXT NOT NULL, ctx TEXT NOT NULL)`);
     db.run("CREATE INDEX IF NOT EXISTS vehicle_events_car ON vehicle_events (install_id, seq)");
@@ -185,9 +190,23 @@ export class ApiStore {
     this.db.query("DELETE FROM pairings WHERE install_id = ?1").run(installId);
   }
 
+  /** 폰만 쓰는 계정(차 없는 친구)을 만든다. 토큰은 해시로만 저장한다. */
+  registerPhoneAccount(displayName: string): { phoneToken: string; accountId: string } {
+    const accountId = `ph_${randomBytes(12).toString("base64url")}`;
+    const phoneToken = randomBytes(32).toString("base64url");
+    this.db.transaction(() => {
+      this.db.query("INSERT INTO phone_accounts (account_id, token_hash, created_at) VALUES (?1, ?2, ?3)").run(accountId, sha256(phoneToken), this.clock.now());
+      this.patchSettings(accountId, { displayName });
+    })();
+    return { phoneToken, accountId };
+  }
+
   phoneLookup(token: string): string | null {
-    const r = this.db.query("SELECT install_id FROM pairings WHERE phone_hash = ?1").get(sha256(token)) as { install_id: string } | null;
-    return r?.install_id ?? null;
+    const h = sha256(token);
+    const r = this.db.query("SELECT install_id FROM pairings WHERE phone_hash = ?1").get(h) as { install_id: string } | null;
+    if (r) return r.install_id;
+    const p = this.db.query("SELECT account_id FROM phone_accounts WHERE token_hash = ?1").get(h) as { account_id: string } | null;
+    return p?.account_id ?? null;
   }
 
   // ---- 기억 ----
@@ -255,15 +274,15 @@ export class ApiStore {
 
   // ---- 설정 ----
   getSettings(installId: string): ServerSettings {
-    const r = this.db.query("SELECT proactive, memory_enabled, speech, nickname, body_color, hat, neck FROM settings WHERE install_id = ?1").get(installId) as
+    const r = this.db.query("SELECT proactive, memory_enabled, speech, nickname, body_color, hat, neck, display_name, checkin_time FROM settings WHERE install_id = ?1").get(installId) as
       | {
           proactive: Settings["proactive"]; memory_enabled: number; speech: Settings["speech"]; nickname: string | null;
-          body_color: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1;
+          body_color: 0 | 1 | null; hat: 0 | 1 | 2; neck: 0 | 1; display_name: string | null; checkin_time: string | null;
         } | null;
     if (!r) return { ...DEFAULT_SETTINGS };
     return {
       proactive: r.proactive, memoryEnabled: r.memory_enabled === 1, speech: r.speech, nickname: r.nickname,
-      bodyColor: r.body_color, hat: r.hat, neck: r.neck,
+      bodyColor: r.body_color, hat: r.hat, neck: r.neck, displayName: r.display_name, checkinTime: r.checkin_time,
     };
   }
 
@@ -271,14 +290,18 @@ export class ApiStore {
     const s = { ...this.getSettings(installId), ...patch };
     this.db
       .query(
-        `INSERT INTO settings (install_id, proactive, memory_enabled, speech, nickname, body_color, hat, neck) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(install_id) DO UPDATE SET proactive = ?2, memory_enabled = ?3, speech = ?4, nickname = ?5, body_color = ?6, hat = ?7, neck = ?8`,
+        `INSERT INTO settings (install_id, proactive, memory_enabled, speech, nickname, body_color, hat, neck, display_name, checkin_time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(install_id) DO UPDATE SET proactive = ?2, memory_enabled = ?3, speech = ?4, nickname = ?5, body_color = ?6, hat = ?7, neck = ?8, display_name = ?9, checkin_time = ?10`,
       )
-      .run(installId, s.proactive, s.memoryEnabled ? 1 : 0, s.speech, s.nickname, s.bodyColor, s.hat, s.neck);
+      .run(installId, s.proactive, s.memoryEnabled ? 1 : 0, s.speech, s.nickname, s.bodyColor, s.hat, s.neck, s.displayName, s.checkinTime);
     return s;
   }
 
-  /** 기억 동의(철회 안 함)와 설정 모두 켜져 있고 녹음 동의도 철회되지 않았을 때만 기억을 쓰고 읽는다. */
+  /** 친구에게 보이는 이름: 표시 이름 → 호칭 → "친구". */
+  displayNameOf(installId: string): string {
+    const s = this.getSettings(installId);
+    return s.displayName ?? s.nickname ?? "친구";
+  }
   memoryAllowed(installId: string): boolean {
     return this.consentGranted(installId, "memory") === true && this.consentGranted(installId, "record") !== false && this.getSettings(installId).memoryEnabled;
   }
