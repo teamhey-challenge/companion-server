@@ -208,13 +208,14 @@ describe("D-48 script, acks, skip, consent gating", () => {
     for (const step of ["whale_intro", "lights", "skip", "found"] as const) {
       const end = await car.step(step);
       expect(end.text).toBe(WHALE_LINES[step]);
+      expect(car.of("onboarding").at(-1)).toMatchObject({ step, voice: "whale" });
     }
     const whaleCalls = b.tts.voices.length;
     expect(b.tts.voices.every((v) => v === "whale")).toBe(true);
     for (const step of ["dress", "qr", "done"] as const) {
       const end = await car.step(step);
       expect(end.text).toBe(HEYRI_LINES[step].banmal);
-      expect(car.of("onboarding").at(-1)).toMatchObject({ step, text: HEYRI_LINES[step].banmal });
+      expect(car.of("onboarding").at(-1)).toMatchObject({ step, voice: "heyri", text: HEYRI_LINES[step].banmal });
     }
     expect(b.tts.voices.slice(whaleCalls).every((v) => v === undefined)).toBe(true);
     expect(car.of("error")).toEqual([]);

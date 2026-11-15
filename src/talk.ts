@@ -764,11 +764,11 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (step !== "greeting") {
       const heyri = step === "memory" || step === "dress" || step === "qr" || step === "done";
       const text = heyri ? HEYRI_LINES[step === "memory" && !store.memoryAllowed(d.installId) ? "memoryOff" : step][s.speech] : WHALE_LINES[step];
-      ws.send(JSON.stringify({ type: "onboarding", step, id, text }));
+      ws.send(JSON.stringify({ type: "onboarding", step, id, voice: heyri ? "heyri" : "whale", text }));
       void deliver(ws, t, { text, driving, speech: s.speech, userText: "", trusted: true, onboarding: true, ...(heyri ? {} : { voice: "whale" as const }) });
       return;
     }
-    ws.send(JSON.stringify({ type: "onboarding", step, id }));
+    ws.send(JSON.stringify({ type: "onboarding", step, id, voice: "heyri" }));
     const a = c.onboarding ?? {};
     const fallback = withName(pick(L.onboardingGreetFallback, s.speech), a.name ?? s.nickname, s.speech);
     store.patchTalkState(d.installId, { lastGreetingDay: kstDay(clock.now()) });
@@ -796,14 +796,14 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
       if (!reply) return;
       const t = openOnboardingTurn(ws, "skip");
       const line = WHALE_LINES.skip;
-      ws.send(JSON.stringify({ type: "onboarding", step: "skip", id: t.id, text: line }));
+      ws.send(JSON.stringify({ type: "onboarding", step: "skip", id: t.id, voice: "whale", text: line }));
       void deliver(ws, t, { text: line, driving, speech: s.speech, userText: "", trusted: true, voice: "whale", onboarding: true });
     };
     const accepted = (answer: string, name?: string | null): void => {
       ack(true, name ?? undefined);
       if (!reply) return;
       const t = openOnboardingTurn(ws, "ack");
-      ws.send(JSON.stringify({ type: "onboarding", step: "ack", for: step, id: t.id }));
+      ws.send(JSON.stringify({ type: "onboarding", step: "ack", for: step, id: t.id, voice: "whale" }));
       const fallback = ackFallback(step, name);
       if (!cfg.apiKey) return void deliver(ws, t, { text: fallback, driving, speech: s.speech, userText: "", trusted: true, voice: "whale", onboarding: true });
       void deliver(ws, t, { llm: { system: ackInstruction(step, answer), userText: answer, maxTokens: 40, fallback, firstMs: ackFirstMs }, driving, speech: s.speech, userText: "", voice: "whale", onboarding: true });

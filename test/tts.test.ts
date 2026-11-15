@@ -170,6 +170,26 @@ describe("BreezeTts", () => {
     expect(out.length).toBeGreaterThan(0);
   });
 
+  test("whale requests carry the whale voice, same model/language, speed 1.5 (1.4 for short pieces); heyri request is unchanged", async () => {
+    const seen: { url: string; body: Record<string, unknown> }[] = [];
+    const f = (async (url: string, init: RequestInit) => {
+      seen.push({ url, body: JSON.parse(String(init.body)) });
+      return pcm();
+    }) as unknown as typeof fetch;
+    const tts = new BreezeTts({ ...cfg, onboardingVoiceId: "voc_whale" }, obs, f);
+    const drain = async (text: string, voice?: "whale") => {
+      for await (const _ of await tts.synth(text, new AbortController().signal, voice ? { voice } : undefined)) void _;
+    };
+    await drain("여기 빛 하나하나가 너의 헤이리가 될 수 있어.", "whale");
+    await drain("괜찮아, 다음에 알려 줘.", "whale");
+    await drain("여기 빛 하나하나가 너의 헤이리가 될 수 있어.");
+    expect(seen[0]?.url).toContain("/voc_whale/stream");
+    expect(seen[0]?.body).toMatchObject({ model_id: "breeze-tts-2-multilingual", language_code: "ko", voice_settings: { use_speaker_boost: true, speed: 1.5 } });
+    expect(seen[1]?.body).toMatchObject({ voice_settings: { use_speaker_boost: true, speed: 1.4 } });
+    expect(seen[2]?.url).toContain("/voc_old/stream");
+    expect(seen[2]?.body.voice_settings).toEqual({ use_speaker_boost: true });
+  });
+
   test("404 recreates the voice exactly once", async () => {
     const urls: string[] = [];
     let ttsCalls = 0;
