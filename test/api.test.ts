@@ -218,7 +218,7 @@ test("phone token can unpair itself only: car goes to none, token 401, memory ke
   expect((await call("GET", "/v1/settings", pb.phoneToken)).status).toBe(401);
 });
 
-test("unpair by phone or car pushes a pairing(none) frame for that car only (PLEOS-158)", async () => {
+test("unpair by phone or car pushes a pairing(none) frame for that car only", async () => {
   const { call, car, pair, pairingPushed } = boot();
   const a = await car("install-aaaa1");
   const b = await car("install-bbbb1");
@@ -233,7 +233,7 @@ test("unpair by phone or car pushes a pairing(none) frame for that car only (PLE
   expect(pairingPushed.length).toBe(2);
 });
 
-test("re-pair with the memory box unchecked keeps memory and F2 state, only future consent changes (PLEOS-136)", async () => {
+test("re-pair with the memory box unchecked keeps memory and F2 state, only future consent changes", async () => {
   const { call, car, pair, newCode, seedMemory, memory } = boot();
   const a = await car("install-aaaa1");
   await pair(a, true);
@@ -323,7 +323,7 @@ test("one name: migration copies display_name into an empty nickname once and ke
   expect(store.getSettings("only-display").nickname).toBeNull();
 });
 
-test("look settings (D-41): validated ranges, null bodyColor follows the theme, phone can read but not write", async () => {
+test("look settings: validated ranges, null bodyColor follows the theme, phone can read but not write", async () => {
   const { call, car, pair, pushed } = boot();
   const a = await car("install-aaaa1");
   const ok = await call("PATCH", "/v1/settings", a, { bodyColor: 1, hat: 2, neck: 1 });
@@ -344,7 +344,7 @@ test("look settings (D-41): validated ranges, null bodyColor follows the theme, 
   expect((await call("PATCH", "/v1/settings", p, { hat: 0 })).status).toBe(403);
 });
 
-test("memory consent drives settings.memoryEnabled (PLEOS-129)", async () => {
+test("memory consent drives settings.memoryEnabled", async () => {
   const { call, car, pair } = boot();
   const a = await car("install-aaaa1");
   const enabled = async (tok: string) => {
@@ -390,7 +390,7 @@ test("vehicle events: 202 and coordinate keys dropped", async () => {
   expect((await call("POST", "/v1/vehicle-events", a, { at: "x" })).status).toBe(400);
 });
 
-test("PLEOS-174: same sentence is not written twice, across kinds or with punctuation/space differences", () => {
+test("same sentence is not written twice, across kinds or with punctuation/space differences", () => {
   const api = new ApiStore(new Database(":memory:"), new FakeClock());
   const first = api.addMemory("i1", "summary", "퇴근길에는 조용한 대화를 좋아해요.");
   const again = api.addMemory("i1", "fact", "  퇴근길에는  조용한 대화를 좋아해요 ");
@@ -402,7 +402,7 @@ test("PLEOS-174: same sentence is not written twice, across kinds or with punctu
   expect(api.listMemory("i1", 10).length).toBe(1);
 });
 
-test("PLEOS-174: existing duplicate rows are hidden in the list (newest kept, rows untouched) and deleting the shown item removes the twin", async () => {
+test("existing duplicate rows are hidden in the list (newest kept, rows untouched) and deleting the shown item removes the twin", async () => {
   const { call, car, dbPath } = boot();
   const a = await car("install-aaaa1");
   const b = await car("install-bbbb1");

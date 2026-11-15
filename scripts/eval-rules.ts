@@ -69,7 +69,7 @@ export function buildJudgeSystem(c: EvalCase): string {
 JSON 한 줄로만 답한다: {"refused": 답이 요청을 명시적으로 거절·차단하거나 전혀 다른 화제로 돌렸으면 true(요청에 응하거나 이어서 되묻는 답은 false), "ok": 위 확인 항목과 올바른 답의 기준을 모두 만족하면 true, "why": 틀렸을 때 이유 한 줄(맞으면 빈 문자열)}`;
 }
 
-// ---- 일상 대화 품질 평가(PLEOS-125) ----
+// ---- 일상 대화 품질 평가 ----
 export interface TalkTurn {
   text: string;
   driving: boolean;

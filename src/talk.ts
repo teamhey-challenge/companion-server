@@ -27,7 +27,7 @@ const TRIP_HOLD_MS = 60_000;
 const REPLY_WINDOW_MS = 10 * 60_000;
 const FRIEND_SPEAK_RETRY_MS = 500;
 const FRIEND_SPEAK_MAX_TRIES = 40;
-/** 주행 중 한 번에 읽어 주는 친구 말 수(D-57 §6.3). */
+/** 주행 중 한 번에 읽어 주는 친구 말 수(§6.3). */
 const FRIEND_DRIVING_MAX_READ = 3;
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -39,7 +39,7 @@ const DEFAULT_MODELS: Record<string, string> = {
 
 /** 첫 토큰이 이 시간 안에 안 오면, 미리 만들어 둔 짧은 채움말을 한 번 들려준다(차에서 약 1.5초 안에 소리가 나도록). */
 const FILLER_AFTER_MS = 1200;
-/** 한 턴이 LLM 에 쓸 수 있는 전체 시간. 넘으면 스트림을 끊고 `error llm_failed` 로 끝낸다(차의 30초 감시보다 짧다, PLEOS-134). */
+/** 한 턴이 LLM 에 쓸 수 있는 전체 시간. 넘으면 스트림을 끊고 `error llm_failed` 로 끝낸다 (차의 30초 감시보다 짧다). */
 const LLM_DEADLINE_MS = 20_000;
 /** 말이 끝난 뒤 이 시간 동안은 새 먼저 말 걸기를 하지 않는다(재생이 아직 끝나지 않았을 수 있다). */
 const QUIET_AFTER_REPLY_MS = 6000;
@@ -161,7 +161,7 @@ export class TalkHub {
     const msg = JSON.stringify({ type: "pairing", status } satisfies ServerFrame);
     for (const ws of this.socks.get(installId) ?? []) ws.send(msg);
   }
-  /** 폰이 연결됐다: 차 화면이 "연결됐어요!"와 구글 계정 이름을 보여 준다(D-57). */
+  /** 폰이 연결됐다: 차 화면이 "연결됐어요!"와 구글 계정 이름을 보여 준다. */
   pushLinked(installId: string, googleName: string | null): void {
     const msg = JSON.stringify({ type: "pairing", status: "claimed", state: "linked", googleName });
     for (const ws of this.socks.get(installId) ?? []) if (ws.data.kind !== "phone") ws.send(msg);
@@ -743,7 +743,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   /**
    * 친구 메시지·도착: JSON 프레임을 바로 보내고, 소리는 도착 순서대로 하나씩 헤이리 목소리로 읽는다(같은 TTS 길, turnId = 프레임 id).
    * 말하는 중이면 잠깐 뒤 다시 시도한다(줄은 그대로 유지). 주행 중에는 운전마다 세 개까지만 읽고, 나머지는
-   * "친구 말이 더 있어, 멈추면 보여 줄게" 한 번만 말한 뒤 정차하면 읽는다(D-57 §6.3).
+   * "친구 말이 더 있어, 멈추면 보여 줄게" 한 번만 말한 뒤 정차하면 읽는다(§6.3).
    */
   function speakFriend(ws: Ws, push: FriendPush): void {
     const c = conn(ws.data);
@@ -818,7 +818,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
 
   /**
    * 온보딩 단계 하나를 말한다. 고래 단계는 고정 대사를 고래 목소리로, 헤이리 고정 단계(memory·dress·qr·done)는 고정 대사를 헤이리 목소리로,
-   * greeting 은 헤이리가 답을 녹여 LLM 으로 말한다. 주행 중에도 막지 않는다(D-48).
+   * greeting 은 헤이리가 답을 녹여 LLM 으로 말한다. 주행 중에도 막지 않는다.
    * 동의 게이트: CONSENT_FREE_STEPS(고정 대사뿐, 사용자 데이터가 어디로도 가지 않는다)만 record·external_ai 동의 없이 말한다. q1~q3·greeting 은 동의가 있어야 한다.
    * 동의 전에는 저장소에 아무것도 쓰지 않는다(meetStage·greeting 기록은 동의 뒤에만).
    */
@@ -852,7 +852,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
   }
 
   /**
-   * 고래 질문에 말로 한 답. q1 → 호칭·표시 이름, q2·q3 → 운전자의 기억(기억 동의가 있을 때). 동승자가 한 말은 받지 않는다(D-38).
+   * 고래 질문에 말로 한 답. q1 → 호칭·표시 이름, q2·q3 → 운전자의 기억(기억 동의가 있을 때). 동승자가 한 말은 받지 않는다.
    * reply:true 면 받아들인 답엔 고래 맞장구(LLM, 느리면 고정 문장), 못 알아들은 답엔 skip 대사가 이어진다(다시 묻지 않고 넘어간다).
    */
   function onboardingAnswer(ws: Ws, step: QuestionStep, text: string, reply: boolean): void {
@@ -904,7 +904,7 @@ export function talkHandlers(cfg: TalkConfig, observer: Observability, opts?: Ta
     if (!social || baseline || !store.talkAllowed(d.installId)) return;
     const c = conn(d);
     const now = clock.now();
-    // 자정을 넘긴 운행은 시작한 날의 일기에 넣는다(D-57 §6.4).
+    // 자정을 넘긴 운행은 시작한 날의 일기에 넣는다(§6.4).
     const date = c.tripActive && c.tripDate ? c.tripDate : kstDay(now);
     const moving = cur.gear === "D" || cur.gear === "R" || (typeof cur.speedKmh === "number" && cur.speedKmh > 0);
     const place = placeName(cur.destinationName);

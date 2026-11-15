@@ -66,7 +66,7 @@ async function boot(opts: { configured?: boolean; publicPerMin?: number; allowPh
 }
 
 describe("POST /v1/auth/google", () => {
-  test("valid token returns an unlinked phone token named by given_name; logging in again returns the same one; only claim/account/consents/unpair are open (D-58)", async () => {
+  test("valid token returns an unlinked phone token named by given_name; logging in again returns the same one; only claim/account/consents/unpair are open", async () => {
     const e = await boot();
     const a = await e.login("sub-aaa");
     expect(a.res.status).toBe(200);
@@ -219,7 +219,7 @@ describe("linking a car", () => {
     expect((await e.login("sub-bbb")).body.linkedCar).toBe(false);
   });
 
-  test("the same Google account re-claiming its own car is fine; a non-Google claim is refused with google_login_required (D-57)", async () => {
+  test("the same Google account re-claiming its own car is fine; a non-Google claim is refused with google_login_required", async () => {
     const e = await boot();
     const carToken = await e.car("install-aaaa1");
     const a = await e.login("sub-aaa");
@@ -273,7 +273,7 @@ interface PairErr { error?: string; code?: string; phoneToken?: string }
 /** Test helper: the tests know the response shape of the server they just started. */
 const readJson = async <T>(r: Response): Promise<T> => (await r.json()) as T;
 
-describe("D-57 §4.6 pairing rules and failure codes", () => {
+describe("§4.6 pairing rules and failure codes", () => {
   type Env = Awaited<ReturnType<typeof boot>>;
   const newCode = async (e: Env, carToken: string) => readJson<{ pairCode: string; expiresAt: string }>(await e.call("POST", "/v1/pairings", carToken));
   const claimCode = async (e: Env, code: string, token?: string, body: unknown = { record: true, memory: true }) => {

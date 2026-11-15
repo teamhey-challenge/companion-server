@@ -1,7 +1,7 @@
 import { PROACTIVE_INTERVAL_MIN, type Ctx, type ProactiveLevel } from "../shared/packages/protocol/src/index";
 
 /**
- * 먼저 말 걸기 결정(PRD §7.1, §7.7, D-14, D-28). 차 앱이 보낸 ctx 두 장(이전·지금)을 비교해 서버가 정한다.
+ * 먼저 말 걸기 결정 (PRD §7.1, §7.7). 차 앱이 보낸 ctx 두 장(이전·지금)을 비교해 서버가 정한다.
  * 규칙은 순수 함수로 두고, 소켓·타이머·말하기는 talk.ts가 한다.
  */
 
@@ -10,7 +10,7 @@ export type Reason = EventReason | "meet" | "greeting" | "arrival";
 
 /** 같은 이유로 다시 말하기까지 최소 시간(와이퍼가 깜빡여도 반복하지 않게). 같은 주행에서는 아예 한 번만. */
 export const COOLDOWN_MS = 5 * 60_000;
-/** 내비 목적지까지 남은 거리가 이 값(km) 이상이면 "멀리 가는 길"이라 수치·경고 없이 가볍게 한마디 한다(D-47 규칙 11). */
+/** 내비 목적지까지 남은 거리가 이 값(km) 이상이면 "멀리 가는 길"이라 수치·경고 없이 가볍게 한마디 한다(규칙 11). */
 export const LONG_TRIP_KM = 100;
 /** 기어 P로 바뀐 뒤 도착 인사까지(F10). */
 export const ARRIVAL_DELAY_MS = 3000;
@@ -80,7 +80,7 @@ export function detectEvents(prev: Ctx | null, cur: Ctx, nowMs: number): EventRe
 export function eventAllowed(reason: EventReason, level: ProactiveLevel, cur: Ctx, st: ProState, nowMs: number): boolean {
   const gap = intervalMs(level);
   if (gap === null) return false;
-  // D-14: 내비 안내 중엔 새로 말 걸지 않는다. 단 시나리오 2(정차 P 에서 목적지와 주행가능거리 비교)는 안내 음성이 없는 정차 중이라 예외다.
+  // 내비 안내 중엔 새로 말 걸지 않는다. 단 시나리오 2(정차 P 에서 목적지와 주행가능거리 비교)는 안내 음성이 없는 정차 중이라 예외다.
   if (cur.naviGuiding === true && !(reason === "longTrip" && longTrip(cur) && !(typeof cur.speedKmh === "number" && cur.speedKmh > 0))) return false;
   if (st.fired.has(reason)) return false;
   if (st.lastEventAt !== null && nowMs - st.lastEventAt < gap) return false;

@@ -19,7 +19,7 @@ const tts = makeTts(ttsCfg, observer);
 const server = createServer({ port, hostname: process.env.HOST || undefined, talk: cfg, guard, observer, dbPath, tts, passengerWebUrl: process.env.PASSENGER_WEB_URL || undefined, googleClientId: process.env.GOOGLE_WEB_CLIENT_ID || undefined, allowNonGoogleClaim: process.env.COMPANION_ALLOW_NONGOOGLE_CLAIM === "1", allowPhoneOnly: process.env.COMPANION_ALLOW_PHONE_ONLY === "1" });
 observer.event("server.start", { port: server.port ?? port, pid: process.pid, provider: cfg.providerName, model: cfg.model, tts: ttsCfg.provider });
 
-// 고정 문장은 메모리에만 둔다(D-10). 가장 자주 쓰는 10조각만 시작할 때 합성하고(배포마다 도는 호출 수를 아낀다), 나머지는 처음 말할 때 담는다.
+// 고정 문장은 메모리에만 둔다. 가장 자주 쓰는 10조각만 시작할 때 합성하고(배포마다 도는 호출 수를 아낀다), 나머지는 처음 말할 때 담는다.
 // 배경으로, 실제 턴에 자리를 남기며 돈다. COMPANION_TTS_PRIME=0 이면 미리 합성을 건너뛴다(캐시 담기는 그대로).
 if (tts) {
   tts.remember([...fixedPieces(), ...onboardingPieces()]);

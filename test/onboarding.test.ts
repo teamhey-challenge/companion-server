@@ -191,7 +191,7 @@ describe("onboarding flow on /v1/talk", () => {
   });
 });
 
-describe("D-48 script, acks, skip, consent gating", () => {
+describe("script, acks, skip, consent gating", () => {
   test("whale lines match the planner mock and keep the whale name out", () => {
     expect(WHALE_LINES.whale_intro.startsWith("안녕, 나는 빛바다를 지키는 고래야.")).toBe(true);
     expect(WHALE_LINES.q1).toBe("먼저, 뭐라고 불러 줄까?");

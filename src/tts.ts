@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { loadSecrets } from "./llm/secrets";
 import type { Observability } from "./observe";
 
-/** 서버 TTS (developer.md §6.5b, hey_voice.json). 오디오는 메모리에서 바로 흘려보내며 디스크에 쓰지 않는다(D-10). */
+/** 서버 TTS (developer.md §6.5b, hey_voice.json). 오디오는 메모리에서 바로 흘려보내며 디스크에 쓰지 않는다. */
 export const PCM_FORMAT = { format: "pcm_s16le", sampleRate: 24000, channels: 1 } as const;
 
 export const BREEZE_BASE = "https://api.breeze.blue";
@@ -286,7 +286,7 @@ export const FIRST_PIECE_OPTS = { firstClauseMin: 6, firstWordsMin: 10 } as cons
 const CACHE_MAX_BYTES = 50 * 1024 * 1024;
 
 /**
- * 고정 문장의 PCM 을 메모리에만 둔다(D-10: 디스크에 쓰지 않는다). 키는 목소리+문장, 가장 오래 안 쓴 것부터 버려 50MB 를 넘지 않는다.
+ * 고정 문장의 PCM 을 메모리에만 둔다(디스크에 쓰지 않는다). 키는 목소리+문장, 가장 오래 안 쓴 것부터 버려 50MB 를 넘지 않는다.
  * prime 에 넣은 문장만 담는다(LLM 이 만든 문장은 담지 않는다). 적중하면 공급사 호출도, 동시 생성 자리도 쓰지 않는다.
  */
 export class PhraseCache implements TtsProvider {

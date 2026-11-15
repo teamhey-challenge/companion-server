@@ -49,9 +49,9 @@ export interface ApiDeps {
   pushPairing?: (installId: string, status: PairingStatus) => void;
   /** 폰이 연결되면 그 차의 열린 소켓에 pairing(linked, googleName) 프레임을 보낸다. */
   pushLinked?: (installId: string, googleName: string | null) => void;
-  /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결(claim)도 받는다. 운영은 꺼 둔다(D-57). */
+  /** e2e 전용(COMPANION_ALLOW_NONGOOGLE_CLAIM=1): 구글이 아닌 폰 토큰의 연결(claim)도 받는다. 운영은 꺼 둔다. */
   allowNonGoogleClaim?: boolean;
-  /** 시험 전용(COMPANION_ALLOW_PHONE_ONLY=1): 차 없는 폰 전용 계정을 등록·사용할 수 있다. 운영은 끈다(D-58). */
+  /** 시험 전용(COMPANION_ALLOW_PHONE_ONLY=1): 차 없는 폰 전용 계정을 등록·사용할 수 있다. 운영은 끈다. */
   allowPhoneOnly?: boolean;
   /** 동의가 바뀌면 그 차의 열린 소켓이 미뤄 둔 첫 정차 인사·첫 만남을 이어 간다. */
   consentChanged?: (installId: string, withdrawn: boolean) => void;
@@ -181,7 +181,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
   }
   const { installId } = who;
   const carOnly = (): Response | null => (who.kind === "car" ? null : json({ error: "forbidden" }, 403));
-  // D-58: 차와 연결되지 않은 폰 토큰(폰 전용 계정)은 계정 조회·동의·연결 해제만 쓴다(연결 claim 은 토큰 없는 공개 경로에서 처리).
+  // 차와 연결되지 않은 폰 토큰(폰 전용 계정)은 계정 조회·동의·연결 해제만 쓴다(연결 claim 은 토큰 없는 공개 경로에서 처리).
   if (who.kind === "phone" && installId.startsWith("ph_") && !d.allowPhoneOnly) {
     const open =
       (path === "/v1/account" && m === "GET") ||
@@ -229,7 +229,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     const purge = !b.granted && (b.type === "record" || b.type === "memory");
     d.api.atomically(() => {
       d.api.setConsent(installId, b.type as ConsentType, b.version as string, b.granted as boolean);
-      // D-53: 기억·녹음 동의 철회는 일기와 친구 메시지도 바로 지운다.
+      // 기억·녹음 동의 철회는 일기와 친구 메시지도 바로 지운다.
       if (purge) d.social.store.deleteAccountData(installId);
     });
     d.consentChanged?.(installId, !b.granted);

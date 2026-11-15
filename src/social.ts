@@ -106,7 +106,7 @@ export class Social {
     for (const m of this.store.undelivered(account, this.clock.now() - UNDELIVERED_MAX_AGE_MS, REPLAY_MAX)) this.deliver(m);
   }
 
-  /** 도착 알림: 보낸 사람이 켜 둔 친구에게만. D-53: "도착했대"만 보내고 장소·목적지 이름은 보내지 않는다. */
+  /** 도착 알림: 보낸 사람이 켜 둔 친구에게만. "도착했대"만 보내고 장소·목적지 이름은 보내지 않는다. */
   arrived(account: string): void {
     const fromName = this.api.displayNameOf(account);
     for (const to of this.store.arrivalRecipients(account)) {
@@ -116,7 +116,7 @@ export class Social {
     }
   }
 
-  /** 기억 저장이 꺼져 있으면(동의 없음·설정 끔) 일기에 아무것도 남기지 않는다(D-53). */
+  /** 기억 저장이 꺼져 있으면(동의 없음·설정 끔) 일기에 아무것도 남기지 않는다. */
   private diary(account: string, kind: DiaryKind, text: string, date?: string): void {
     if (this.api.memoryAllowed(account)) this.store.addDiaryEntry(account, kind, text, date);
   }
@@ -138,7 +138,7 @@ export class Social {
   }
 
   /**
-   * 운전이 끝났다(D-57 §6.4). date 는 운행을 시작한 날(자정을 넘겨도 그날의 일기에 넣는다).
+   * 운전이 끝났다(§6.4). date 는 운행을 시작한 날(자정을 넘겨도 그날의 일기에 넣는다).
    * 폰에는 "오늘도 같이 달렸어" 한 줄을 보내고, 차에는 연결 상태에 맞는 한마디(carLine)를 보낸다.
    * 일기를 쓰지 못하면 폰에 "일기 준비됨"을 보내지 않고, 다음 운행 끝에 다시 쓴다.
    */
