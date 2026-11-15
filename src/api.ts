@@ -1,6 +1,5 @@
 import {
   CONSENT_TYPES,
-  MAX_NICKNAME_CHARS,
   PAIR_CODE_RE,
   PHONE_SETTINGS_KEYS,
   PROACTIVE_LEVELS,
@@ -11,10 +10,10 @@ import {
   type PairingStatus,
 } from "../shared/packages/protocol/src/index";
 import type { ApiStore, Principal, ServerSettings, ServerSettingsPatch } from "./api-store";
-import { LOOK_MAX, MAX_DISPLAY_NAME_CHARS, characterFor } from "./api-store";
+import { LOOK_MAX, MAX_NAME_CHARS, characterFor } from "./api-store";
 import { bearer } from "./auth";
 import type { GoogleVerifier } from "./google";
-import type { Social } from "./social";
+import { messageBlocked, type Social } from "./social";
 import { INVITE_CODE_RE, MAX_MESSAGE_CHARS } from "./social-store";
 import type { CarStore, TicketBook } from "./store";
 
@@ -29,8 +28,13 @@ const MAX_VEHICLE_EVENTS = 50;
 const MAX_MEMORY_PAGE = 100;
 const DEFAULT_MEMORY_PAGE = 50;
 const SETTINGS_KEYS = ["proactive", "memoryEnabled", "speech", "nickname", "bodyColor", "hat", "neck", "displayName"] as const;
-/** 폰 토큰이 바꿀 수 있는 설정(공유 규칙의 speech 에 더해). */
-const PHONE_KEYS: readonly string[] = [...PHONE_SETTINGS_KEYS, "displayName"];
+/** 폰 토큰이 바꿀 수 있는 설정(공유 규칙의 speech 에 더해). 이름은 nickname 한 칸이다. */
+const PHONE_KEYS: readonly string[] = [...PHONE_SETTINGS_KEYS, "nickname"];
+
+/** 이름 검증: 1~10자, 숫자만은 안 됨, 안전 필터 통과. 입력은 이미 trim 한 값. */
+export function validName(t: string): boolean {
+  return t.length > 0 && [...t].length <= MAX_NAME_CHARS && !/^\d+$/.test(t) && !messageBlocked(t);
+}
 
 export interface ApiDeps {
   api: ApiStore;
@@ -96,17 +100,15 @@ function parsePatch(body: unknown): ServerSettingsPatch | null {
       patch[k] = v;
       continue;
     }
-    if (k === "nickname") {
-      if (v !== null && typeof v !== "string") return null;
-      const t = typeof v === "string" ? v.trim() : null;
-      if (t !== null && [...t].length > MAX_NICKNAME_CHARS) return null;
-      patch[k] = t ? t : null;
-      continue;
-    }
-    if (k === "displayName") {
+    if (k === "nickname" || k === "displayName") {
+      // 이름은 nickname 한 칸이다. displayName 은 옛 폰 앱이 보내는 별칭이라 같은 칸에 쓴다.
+      if (k === "nickname" && v === null) {
+        patch.nickname = null;
+        continue;
+      }
       const t = typeof v === "string" ? v.trim() : "";
-      if (!t || [...t].length > MAX_DISPLAY_NAME_CHARS) return null;
-      patch[k] = t;
+      if (!validName(t)) return null;
+      patch.nickname = t;
       continue;
     }
     patch[k] = v;
@@ -137,7 +139,7 @@ export async function handleApi(req: Request, url: URL, ip: string, d: ApiDeps):
     if (d.throttled(ip, "phreg", d.publicPerMin)) return err("rate_limited", 429);
     const b = await readJson(req);
     const name = isObj(b) && typeof b.displayName === "string" ? b.displayName.trim() : "";
-    if (!name || [...name].length > MAX_DISPLAY_NAME_CHARS) return bad();
+    if (!validName(name)) return bad();
     return json(d.api.registerPhoneAccount(name));
   }
   const pub = /^\/v1\/pairings\/([^/]+)(\/claim)?$/.exec(path);

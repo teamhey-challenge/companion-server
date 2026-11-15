@@ -100,7 +100,7 @@
 
 ## 온보딩·가족 (D-48)
 
-`/v1/talk` 위의 온보딩 프레임(hello·동의 필요, 주행 중에도 막지 않는다): 앱→서버 `{"type":"onboarding","step":"whale_intro|q1|q2|q3|greeting"}`는 그 단계를 지금 말하라는 뜻이고, 서버는 `{"type":"onboarding","step","id","text"?}` 뒤에 `reply.start`·PCM·`reply.end`(turnId = id)를 보낸다. 고래 단계(`whale_intro`·`q1`~`q3`)는 고정 대사를 고래 목소리로, `greeting`은 헤이리 목소리로 q1~q3 답을 녹여 LLM이 쓴다(LLM 키가 없거나 실패하면 고정 인사). 답은 앱→서버 `{"type":"onboarding.answer","step":"q1|q2|q3","text":"<STT 문장>"}`, 응답 `{"type":"onboarding.ack","step","ok","name"?}`. `ok:false`(안전 필터·알아듣지 못함)면 다시 묻는다. q1은 `nickname`·`displayName`(settings 프레임 푸시), q2·q3는 운전자의 기억(기억 동의가 있을 때)이 된다. 온보딩을 하면 헤이리의 어투·호칭 첫 만남(F2)은 끝난 것으로 본다.
+`/v1/talk` 위의 온보딩 프레임(hello·동의 필요, 주행 중에도 막지 않는다): 앱→서버 `{"type":"onboarding","step":"whale_intro|q1|q2|q3|greeting"}`는 그 단계를 지금 말하라는 뜻이고, 서버는 `{"type":"onboarding","step","id","text"?}` 뒤에 `reply.start`·PCM·`reply.end`(turnId = id)를 보낸다. 고래 단계(`whale_intro`·`q1`~`q3`)는 고정 대사를 고래 목소리로, `greeting`은 헤이리 목소리로 q1~q3 답을 녹여 LLM이 쓴다(LLM 키가 없거나 실패하면 고정 인사). 답은 앱→서버 `{"type":"onboarding.answer","step":"q1|q2|q3","text":"<STT 문장>"}`, 응답 `{"type":"onboarding.ack","step","ok","name"?}`. `ok:false`(안전 필터·알아듣지 못함)면 다시 묻는다. q1은 `nickname`(settings 프레임 푸시), q2·q3는 운전자의 기억(기억 동의가 있을 때)이 된다. 이름은 계정당 `nickname` 한 칸이고(1~10자, 숫자만 불가, 안전 필터), `displayName`은 응답에만 나오는 읽기 전용 별칭(= `nickname` ?? "친구")이다. 폰·차의 PATCH `displayName`/`nickname`은 모두 `nickname`에 쓰며 친구에게 보이는 이름도 같다. 온보딩을 하면 헤이리의 어투·호칭 첫 만남(F2)은 끝난 것으로 본다.
 
 고래 목소리: `ONBOARDING_VOICE_ID`(환경변수 또는 `~/.config/companion/server.env`). 없으면 헤이리 목소리로 대신하고 시작할 때 `tts.whale_voice_fallback`을 한 번 로그한다. 값은 로그·저장소에 남기지 않는다.
 

@@ -262,13 +262,66 @@ test("public pairing lookup is rate limited per IP", async () => {
 test("settings PATCH pushes to the hub and validates input", async () => {
   const { call, car, pushed } = boot();
   const a = await car("install-aaaa1");
-  expect(await (await call("GET", "/v1/settings", a)).json()).toEqual({ proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: null });
+  expect(await (await call("GET", "/v1/settings", a)).json()).toEqual({ proactive: "normal", memoryEnabled: true, speech: "banmal", nickname: null, bodyColor: null, hat: 1, neck: 0, displayName: "친구" });
   expect((await call("PATCH", "/v1/settings", a, { proactive: "high" })).status).toBe(200);
   expect(pushed.length).toBe(1);
   expect((await call("PATCH", "/v1/settings", a, { proactive: "loud" })).status).toBe(400);
   expect((await call("PATCH", "/v1/settings", a, { nickname: "가".repeat(21) })).status).toBe(400);
   expect((await call("PATCH", "/v1/settings", a, { bogus: 1 })).status).toBe(400);
   expect(pushed.length).toBe(1);
+});
+
+test("one name: displayName is a read-only alias of nickname; phone PATCH of either key writes nickname", async () => {
+  const { call, car, pair } = boot();
+  const a = await car("install-aaaa1");
+  const p = await pair(a);
+  expect((await call("PATCH", "/v1/settings", p.phoneToken, { displayName: " 하늘 " })).status).toBe(200);
+  expect(await (await call("GET", "/v1/settings", a)).json()).toMatchObject({ nickname: "하늘", displayName: "하늘" });
+  expect((await call("PATCH", "/v1/settings", p.phoneToken, { nickname: "바다" })).status).toBe(200);
+  expect(await (await call("GET", "/v1/settings", p.phoneToken)).json()).toMatchObject({ nickname: "바다", displayName: "바다" });
+  // the car edits the same field; the phone sees it and so does the account endpoint (what friends see)
+  expect((await call("PATCH", "/v1/settings", a, { nickname: "구름" })).status).toBe(200);
+  expect(await (await call("GET", "/v1/account", p.phoneToken)).json()).toMatchObject({ displayName: "구름" });
+  // clearing falls back to 친구
+  expect((await call("PATCH", "/v1/settings", a, { nickname: null })).status).toBe(200);
+  expect(await (await call("GET", "/v1/settings", a)).json()).toMatchObject({ nickname: null, displayName: "친구" });
+});
+
+test("one name: validation is 1-10 chars after trim, not digits-only, passes the safety filter, same on both keys and on phone register", async () => {
+  const { call, car, pair } = boot();
+  const a = await car("install-aaaa1");
+  const p = await pair(a);
+  for (const key of ["nickname", "displayName"]) {
+    for (const bad of ["", "   ", "가".repeat(11), "12345", "씨발", "http://x.com"]) {
+      expect((await call("PATCH", "/v1/settings", a, { [key]: bad })).status).toBe(400);
+      expect((await call("PATCH", "/v1/settings", p.phoneToken, { [key]: bad })).status).toBe(400);
+    }
+    expect((await call("PATCH", "/v1/settings", a, { [key]: "가".repeat(10) })).status).toBe(200);
+    expect((await call("PATCH", "/v1/settings", a, { [key]: "민수2" })).status).toBe(200);
+  }
+  expect((await call("POST", "/v1/phones/register", undefined, { displayName: "123" })).status).toBe(400);
+  expect((await call("POST", "/v1/phones/register", undefined, { displayName: "가".repeat(11) })).status).toBe(400);
+});
+
+test("one name: migration copies display_name into an empty nickname once and keeps an existing nickname", () => {
+  const dbPath = `${mkdtempSync(`${tmpdir()}/api-`)}/old.db`;
+  const db = new Database(dbPath);
+  db.run("CREATE TABLE settings (install_id TEXT PRIMARY KEY, proactive TEXT NOT NULL, memory_enabled INTEGER NOT NULL, speech TEXT NOT NULL, nickname TEXT, display_name TEXT)");
+  const ins = db.query("INSERT INTO settings (install_id, proactive, memory_enabled, speech, nickname, display_name) VALUES (?1, 'normal', 1, 'banmal', ?2, ?3)");
+  ins.run("only-display", null, "지은");
+  ins.run("both", "하늘", "다른이름");
+  ins.run("neither", null, null);
+  ins.run("blank-nick", "  ", "민수");
+  const clock = new FakeClock();
+  const store = new ApiStore(db, clock);
+  expect(store.getSettings("only-display")).toMatchObject({ nickname: "지은", displayName: "지은" });
+  expect(store.getSettings("both")).toMatchObject({ nickname: "하늘", displayName: "하늘" });
+  expect(store.getSettings("neither")).toMatchObject({ nickname: null, displayName: "친구" });
+  expect(store.getSettings("blank-nick")).toMatchObject({ nickname: "민수" });
+  // a second open is a no-op: the old column was emptied, so a later cleared nickname is not resurrected
+  store.patchSettings("only-display", { nickname: null });
+  new ApiStore(db, clock);
+  expect(store.getSettings("only-display").nickname).toBeNull();
 });
 
 test("look settings (D-41): validated ranges, null bodyColor follows the theme, phone can read but not write", async () => {
