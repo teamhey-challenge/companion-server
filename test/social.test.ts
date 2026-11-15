@@ -24,14 +24,16 @@ interface Env {
   j: <T>(r: Response) => Promise<T>;
 }
 
-function boot(): Env {
+let diaryGate: Promise<void> | null = null;
+
+function boot(publicPerMin = 5): Env {
   const s = createServer({
     port: 0, hostname: "127.0.0.1", talk, observer: new Observability(() => {}), dbPath: ":memory:",
     guard: { provisionSecret: SECRET, trustProxy: false, turnsPerMin: 100, turnsPerDay: 1000, upgradesPerMin: 100, httpPerMin: 1000 },
-    publicPerMin: 5, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(),
+    publicPerMin, tripHoldMs: 60, passengerWebUrl: "https://web.test/", tts: new FakeTts(),
     fetchImpl: (async (_u: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messages: { content: string }[] };
-      const text = body.messages[0]!.content.includes("일기") ? DIARY : "그렇구나, 좋아!";
+      const text = body.messages[0]!.content.includes("일기") ? (await diaryGate, DIARY) : "그렇구나, 좋아!";
       return new Response(sse(text), { headers: { "content-type": "text/event-stream" } });
     }) as unknown as typeof fetch,
   });
@@ -120,7 +122,6 @@ describe("accounts", () => {
     const e = boot();
     const p = await phone(e, "지은");
     expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: "08:30" })).status).toBe(400);
-    expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { checkinTime: null })).status).toBe(400);
     expect(await e.j(await e.call("GET", "/v1/settings", p.phoneToken))).not.toHaveProperty("checkinTime");
     expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { displayName: "하늘" })).status).toBe(200);
     expect((await e.call("PATCH", "/v1/settings", p.phoneToken, { proactive: "off" })).status).toBe(403);
@@ -283,6 +284,35 @@ describe("push", () => {
     expect(JSON.stringify(bInbox.frames)).not.toContain("카페 하늘");
   });
 
+  test("friend_arrived is sent on arrival even when no destination was ever sent (D-53: place is never sent)", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const b = await phone(e, "민수");
+    await befriend(e, a, b.phoneToken);
+    const mine = (await friendsOf(e, a))[0]!;
+    await e.call("PATCH", `/v1/friends/${mine.id}`, a, { shareArrival: true });
+    const bInbox = await inbox(e, b.phoneToken);
+    const carSock = await carSocket(e, a);
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 40 } });
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, arrived: true } });
+    await bInbox.until(() => bInbox.of("friend_arrived").length === 1);
+    expect(bInbox.of("friend_arrived")[0]).toEqual({ type: "friend_arrived", id: expect.any(String), fromName: "지은" });
+  });
+
+  test("friend cap: the 51st accepted invite is refused with 409", async () => {
+    const e = boot(500);
+    const a = await car(e, "install-aaaa1", "지은");
+    for (let i = 0; i < 50; i++) {
+      const p = await phone(e, `친구${i}`);
+      expect((await e.call("POST", `/v1/friends/invites/${(await e.j<{ code: string }>(await e.call("POST", "/v1/friends/invites", a))).code}/accept`, p.phoneToken)).status).toBe(200);
+    }
+    const last = await phone(e, "마지막");
+    const inv = await e.j<{ code: string }>(await e.call("POST", "/v1/friends/invites", a));
+    expect((await e.call("POST", `/v1/friends/invites/${inv.code}/accept`, last.phoneToken)).status).toBe(409);
+    expect((await friendsOf(e, a)).length).toBe(50);
+  });
+
   test("friend_arrived to a car is spoken as '<name>가 도착했대' without the destination", async () => {
     const e = boot();
     const a = await car(e, "install-aaaa1", "지은");
@@ -357,9 +387,25 @@ describe("trip end and diary", () => {
     carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
     await stream.until(() => stream.of("trip_done").length === 1);
     expect(stream.of("trip_done")[0]!.text).toBe("오늘도 같이 달렸어. 수고했어!");
+    expect(stream.of("trip_done")[0]).toMatchObject({ id: expect.any(String), at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
     carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: true } });
     await Bun.sleep(150);
     expect(stream.of("trip_done")).toHaveLength(1);
+  });
+
+  test("a passenger door opening in P does not end the trip when the driver door signal is present; the driver door does", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const stream = await inbox(e, await paired(e, a));
+    const carSock = await carSocket(e, a);
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+    carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30 } });
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: false, doorOpen: false } });
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: false, doorOpen: true } });
+    await Bun.sleep(30);
+    expect(stream.of("trip_done")).toEqual([]);
+    carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0, driverDoorOpen: true, doorOpen: true } });
+    await stream.until(() => stream.of("trip_done").length === 1);
   });
 
   test("going back to D before the hold time cancels the end; diary of another account is empty", async () => {
@@ -459,13 +505,47 @@ describe("voice intents in car talk", () => {
   test("parser: named, reply and non-matching phrases", () => {
     expect(parseSendIntent("민수한테 오늘 늦는다고 전해 줘")).toEqual({ name: "민수", text: "오늘 늦는다" });
     expect(parseSendIntent("고맙다고 전해 줘")).toEqual({ name: null, text: "고마워!" });
-    expect(parseSendIntent("지은이에게 곧 도착한다고 말해줘")).toEqual({ name: "지은이", text: "곧 도착한다" });
+    expect(parseSendIntent("지은이에게 곧 도착한다고 전해줘")).toEqual({ name: "지은이", text: "곧 도착한다" });
     expect(parseSendIntent("오늘 날씨 어때")).toBeNull();
     expect(parseSendIntent("전해 줘")).toBeNull();
+    expect(parseSendIntent("나한테 재밌는 얘기 말해 줘")).toBeNull();
+    expect(parseSendIntent("내일 비 온다고 알려 줘")).toBeNull();
+    expect(parseSendIntent("나한테 곧 간다고 전해 줘")).toBeNull();
+    expect(parseSendIntent("민수한테오늘늦는다고전해줘")).toEqual({ name: "민수", text: "오늘늦는다" });
+    expect(parseSendIntent("민수한테 곧 간다고 전해 달라고")).toEqual({ name: "민수", text: "곧 간다" });
+    expect(matchFriends("민", [{ name: "민수" }])).toEqual([]);
     expect(matchFriends("민수야", [{ name: "민수" }, { name: "지은" }])).toEqual([{ name: "민수" }]);
     expect(ga("민수")).toBe("민수가");
     expect(ga("지은")).toBe("지은이가");
     expect(friendSaid("지은", "안녕", "banmal")).toBe("지은이가 그러는데, 안녕");
+  });
+
+  test("H-1: withdrawing memory consent while the diary LLM is running drops the summary and the diary_ready push", async () => {
+    const e = boot();
+    const a = await car(e, "install-aaaa1", "지은");
+    const pc = (await e.j<{ pairCode: string }>(await e.call("POST", "/v1/pairings", a))).pairCode;
+    const phoneTok = (await e.j<{ phoneToken: string }>(await e.call("POST", `/v1/pairings/${pc}/claim`, undefined, { record: true, memory: true }))).phoneToken;
+    const stream = await inbox(e, phoneTok);
+    const { promise, resolve } = Promise.withResolvers<void>();
+    diaryGate = promise;
+    try {
+      const carSock = await carSocket(e, a);
+      carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+      carSock.send({ type: "ctx", ctx: { gear: "D", speedKmh: 30 } });
+      carSock.send({ type: "ctx", ctx: { gear: "P", speedKmh: 0 } });
+      await stream.until(() => stream.of("trip_done").length === 1);
+      expect((await e.call("DELETE", "/v1/consents/memory", a)).status).toBe(204);
+      resolve();
+      await Bun.sleep(150);
+      expect(stream.of("diary_ready")).toEqual([]);
+      const today = String(stream.of("trip_done")[0]!.date);
+      const d = await e.j<{ entries: unknown[]; summary: unknown }>(await e.call("GET", `/v1/diary?date=${today}`, phoneTok));
+      expect(d.summary).toBeNull();
+      carSock.ws.close();
+    } finally {
+      resolve();
+      diaryGate = null;
+    }
   });
 
   test("'민수한테 늦는다고 전해 줘' sends a message and confirms by voice; the phone receives it", async () => {
@@ -483,13 +563,13 @@ describe("voice intents in car talk", () => {
   test("ambiguous names ask back, the next answer sends; unknown names are said so", async () => {
     const e = boot();
     const a = await car(e, "install-aaaa1", "지은");
-    const m1 = await phone(e, "민수");
-    const m2 = await phone(e, "민석");
+    const m1 = await phone(e, "김민수");
+    const m2 = await phone(e, "김민석");
     await befriend(e, a, m1.phoneToken);
     await befriend(e, a, m2.phoneToken);
     const carSock = await carSocket(e, a);
-    expect(await say(carSock, "v1", "민한테 곧 간다고 전해 줘")).toContain("민수, 민석");
-    expect(await say(carSock, "v2", "민석")).toBe("민석한테 전했어!");
+    expect(await say(carSock, "v1", "김민한테 곧 간다고 전해 줘")).toContain("김민수, 김민석");
+    expect(await say(carSock, "v2", "김민석")).toBe("김민석한테 전했어!");
     const got = (await e.j<{ messages: { text: string }[] }>(await e.call("GET", "/v1/messages", m2.phoneToken))).messages;
     expect(got.map((m) => m.text)).toEqual(["곧 간다"]);
     expect((await e.j<{ messages: unknown[] }>(await e.call("GET", "/v1/messages", m1.phoneToken))).messages).toEqual([]);

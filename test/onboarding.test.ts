@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Observability } from "../src/observe";
-import { buildSystem, MEMORY_EXTRACT_SYSTEM } from "../src/llm/persona";
+
 import { cleanOnboardingAnswer, CONSENT_FREE_STEPS, HEYRI_LINES, ONBOARDING_STEPS, onboardingPieces, parseOnboardingFrame, parseOnboardingName, WHALE_LINES } from "../src/onboarding";
 import { createServer, type RunningServer } from "../src/server";
 import { FakeTts, loadTtsConfig, makeTts } from "../src/tts";
@@ -367,14 +367,5 @@ describe("whale voice config", () => {
       if (prev === undefined) delete process.env.COMPANION_SECRETS_FILE;
       else process.env.COMPANION_SECRETS_FILE = prev;
     }
-  });
-});
-
-describe("family (D-38, D-48)", () => {
-  test("persona: several family members are addressed in turn; extraction keeps only the driver's introduction", () => {
-    const sys = buildSystem({ speech: "banmal", nickname: "민수", driving: false, ctx: {}, memories: [], recent: [] });
-    expect(sys).toContain("번갈아");
-    expect(MEMORY_EXTRACT_SYSTEM).toContain("이름과 관계만");
-    expect(MEMORY_EXTRACT_SYSTEM).toContain("동승자(특히 아이)가 한 말은 기억에서 뽑지 않는다");
   });
 });

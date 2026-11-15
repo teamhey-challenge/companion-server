@@ -136,7 +136,7 @@ export class Social {
     const date = kstDate(now);
     const text = tripDoneLine(place);
     this.diary(account, "trip_done", text);
-    this.inbox.push(account, { type: "trip_done", text, date });
+    this.inbox.push(account, { type: "trip_done", id: crypto.randomUUID(), text, date, at: new Date(now).toISOString() });
     void this.writeDiary(account, date).catch((e: Error) => this.observer.error("diary.failed", String(e.message).slice(0, 200)));
   }
 
@@ -161,6 +161,8 @@ export class Social {
       `너는 "헤이리"다. 운전자와 같이 다닌 하루를 일기로 쓴다. 3~5문장, 문장마다 짧게. ${speech === "jondaetmal" ? "부드러운 존댓말" : "다정한 반말"}로 쓴다. ` +
       "아래 재료에 있는 것만 쓰고 지어내지 않는다. 장소는 이름만 쓰고 좌표·주소·숫자는 쓰지 않는다. 이모지·마크다운·목록 없이 문장만 쓴다.";
     const out = (await this.diaryLlm(system, facts.map((f) => `- ${f}`).join("\n"))).trim();
+    // LLM 을 기다리는 사이 동의가 철회됐을 수 있다.
+    if (!this.api.talkAllowed(account) || !this.api.memoryAllowed(account)) return null;
     const sentences = splitSentences(out).map((s) => s.trim()).filter((s) => s && checkOutput(s, false, "") === "ok" && !/\d+\.\d{3,}/.test(s));
     if (sentences.length === 0) return null;
     const summary = sentences.slice(0, 5).join(" ");

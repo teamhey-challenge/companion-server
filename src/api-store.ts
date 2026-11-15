@@ -87,6 +87,11 @@ export class ApiStore {
     db.run("CREATE TABLE IF NOT EXISTS google_car (install_id TEXT PRIMARY KEY, sub TEXT NOT NULL UNIQUE)");
   }
 
+  /** 여러 저장 동작을 한 트랜잭션으로 묶는다(중첩 가능). */
+  atomically<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   // ---- 동의 ----
   listConsents(installId: string): ConsentRecord[] {
     const rows = this.db.query("SELECT type, version, granted, at FROM consents WHERE install_id = ?1 ORDER BY at, type").all(installId) as {
